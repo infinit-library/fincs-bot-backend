@@ -14,10 +14,21 @@ class SaxoOAuthClient:
         # Load existing token if present
         token = os.getenv("SAXO_ACCESS_TOKEN")
         expires_at = os.getenv("SAXO_ACCESS_TOKEN_EXPIRES_AT")
+        ttl = os.getenv("SAXO_ACCESS_TOKEN_TTL")
 
         if token and expires_at:
             self.access_token = token
             self.expires_at = float(expires_at)
+        elif token and ttl:
+            self.access_token = token
+            try:
+                self.expires_at = time.time() + float(ttl) - 30
+            except ValueError:
+                self.expires_at = 0.0
+        elif token:
+            # Treat missing TTL as expired to fail closed
+            self.access_token = None
+            self.expires_at = 0.0
 
     def get_authorize_url(self) -> str:
         return (
@@ -57,10 +68,15 @@ class SaxoOAuthClient:
         expires_in = int(data["expires_in"])
         self.expires_at = time.time() + expires_in - 30
 
-        print("✅ OAuth authentication successful")
+        print("OAuth authentication successful")
         print("Access token acquired")
 
         # (optional) print for debugging
+        print(f"Access token: {self.access_token}")
+        if "refresh_token" in data:
+            print(f"Refresh token: {data['refresh_token']}")
+        if "refresh_token_expires_in" in data:
+            print(f"Refresh token expires in {data['refresh_token_expires_in']} seconds")
         print(f"Token expires in {expires_in} seconds")
 
     def get_access_token(self) -> str:

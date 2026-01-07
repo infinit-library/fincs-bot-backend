@@ -44,6 +44,44 @@ def _normalize_text(s: str) -> str:
     return s.translate(fullwidth_digits).upper()
 
 
+def _parse_direction(text: str) -> Optional[str]:
+    m = re.search(r"\b(?:DIRECTION|SIDE)\s*[:=]\s*(BUY|SELL)\b", text, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return None
+
+
+def _parse_instrument(text: str) -> Optional[str]:
+    m = re.search(r"\bINSTRUMENT\s*[:=]\s*([A-Z]{3}/[A-Z]{3}|[A-Z]{6})\b", text, flags=re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1).upper()
+
+
+def _parse_uic(text: str) -> Optional[int]:
+    m = re.search(r"\bUIC\s*[:=]\s*(\d+)\b", text, flags=re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _parse_asset_type(text: str) -> Optional[str]:
+    m = re.search(r"\bASSET[_ ]?TYPE\s*[:=]\s*(FxSpot)\b", text, flags=re.IGNORECASE)
+    if m:
+        return "FxSpot"
+    return None
+
+
+def _parse_signal_timestamp(text: str) -> Optional[str]:
+    m = re.search(r"\bTIMESTAMP\s*[:=]\s*([0-9T:\-+.Z]+|\d{10})\b", text, flags=re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return None
+
+
 def _parse_pair(text: str) -> Optional[str]:
     for p in PAIR_LIST:
         if re.search(rf"\b{p}\b", text, flags=re.IGNORECASE):
@@ -114,18 +152,17 @@ def classify_and_parse(seg: str) -> dict:
     entry_price, sl_price, tp_price = _parse_prices(norm)
     lot_ratio = _parse_lot_ratio(norm)
 
+    direction = _parse_direction(s)
+    instrument = _parse_instrument(s)
+    uic = _parse_uic(s)
+    asset_type = _parse_asset_type(s)
+    signal_timestamp = _parse_signal_timestamp(s)
+
     trading_hints = ['entry', '?????', '??', '???', 'take profit', 'tp', 'sl', 'stop', '??']
     has_hint = any(h in lower for h in trading_hints)
 
-    # Be stricter: require a side/price/lot, or a pair plus a trading hint.
-    is_trading = bool(
-        side
-        or entry_price
-        or tp_price
-        or sl_price
-        or lot_ratio
-        or (pair and has_hint)
-    )
+    # Require explicit structured fields for executable signals.
+    is_trading = bool(direction and instrument and uic is not None and asset_type == "FxSpot" and signal_timestamp)
     action = 'ENTRY' if is_trading else None
     is_add = 'ADD' in norm or '??' in s  # lightweight add-on marker
 
@@ -145,6 +182,11 @@ def classify_and_parse(seg: str) -> dict:
         'sl_price': sl_price,
         'tp_price': tp_price,
         'signal_id': signal_id,
+        'direction': direction,
+        'instrument': instrument,
+        'uic': uic,
+        'asset_type': asset_type,
+        'signal_timestamp': signal_timestamp,
     }
 
 
@@ -201,6 +243,11 @@ def save_snapshot_and_segments(raw_text: str, channel: str = 'NOBU_CHANNEL'):
             sl_price=parsed['sl_price'],
             tp_price=parsed['tp_price'],
             signal_id=parsed['signal_id'],
+            direction=parsed['direction'],
+            instrument=parsed['instrument'],
+            uic=parsed['uic'],
+            asset_type=parsed['asset_type'],
+            signal_timestamp=parsed['signal_timestamp'],
         )
         if did_insert:
             inserted += 1

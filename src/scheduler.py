@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from src import config as runtime_config
+from src import runtime_config
 from .executor import run_execution_cycle
 from .storage import connect_db, get_latest_snapshot, DB_PATH
 

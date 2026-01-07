@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import threading
 
-from src import config as runtime_config
+from src import runtime_config
 from .executor import list_recent_orders, run_execution_cycle
 from .storage import (
     DB_PATH,

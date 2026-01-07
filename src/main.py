@@ -1,5 +1,6 @@
 from src.config.setting import SaxoSettings
 from src.auth.saxo_oauth import SaxoOAuthClient
+import urllib.parse
 
 
 def main():
@@ -23,7 +24,14 @@ def main():
     print()
 
     # Step 2: user pastes ?code=XXXX value
-    code = input("Paste authorization code here: ").strip()
+    code_input = input("Paste authorization code here: ").strip()
+    code = code_input
+    if "code=" in code_input:
+        parsed = urllib.parse.urlparse(code_input)
+        qs = urllib.parse.parse_qs(parsed.query)
+        code = (qs.get("code") or [""])[0]
+    if "#" in code:
+        code = code.split("#", 1)[0].strip()
 
     oauth.authenticate(code)
 

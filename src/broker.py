@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from src import config as runtime_config
+from src import runtime_config
 from .config.setting import SaxoSettings
 from .auth.saxo_oauth import SaxoOAuthClient
 
@@ -37,8 +37,9 @@ def get_broker(name: str):
         settings = SaxoSettings.from_env()
         oauth = SaxoOAuthClient(settings)
         account_key = os.getenv("SAXO_ACCOUNT_KEY")
+        client_key = os.getenv("SAXO_CLIENT_KEY")
         uic_map = _load_uic_map(runtime_config.load_settings())
         from .brokers.saxo import SaxoBroker
 
-        return SaxoBroker(oauth, settings, account_key=account_key, uic_map=uic_map)
+        return SaxoBroker(oauth, settings, account_key=account_key, client_key=client_key, uic_map=uic_map)
     raise ValueError(f"Unsupported broker: {name}")

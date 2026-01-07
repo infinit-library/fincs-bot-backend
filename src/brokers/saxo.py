@@ -11,12 +11,13 @@ from src.broker import BrokerResult
 class SaxoBroker:
     name = "saxo"
 
-    def __init__(self, oauth: SaxoOAuthClient, settings: SaxoSettings, account_key: Optional[str] = None, uic_map: Optional[Dict[str, int]] = None):
+    def __init__(self, oauth: SaxoOAuthClient, settings: SaxoSettings, account_key: Optional[str] = None, client_key: Optional[str] = None, uic_map: Optional[Dict[str, int]] = None):
         self.oauth = oauth
         self.base_url = settings.base_url
         self.account_key = account_key
+        self.client_key = client_key
         self.uic_map = {k.upper(): int(v) for k, v in (uic_map or {}).items()}
-        self._positions_cache: Dict[str, int] = {}
+        self._positions_cache: Dict[int, int] = {}
 
     def _headers(self) -> dict:
         return {
@@ -46,9 +47,60 @@ class SaxoBroker:
 
     def get_balance(self) -> dict:
         url = f"{self.base_url}/port/v1/balances"
-        response = requests.get(url, headers=self._headers(), timeout=10)
+        params = {}
+        if self.account_key:
+            params["AccountKey"] = self.account_key
+        if self.client_key:
+            params["ClientKey"] = self.client_key
+        response = requests.get(url, headers=self._headers(), params=params, timeout=10)
         response.raise_for_status()
         return response.json()
+
+    def get_equity(self) -> Optional[float]:
+        try:
+            data = self.get_balance()
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        for key in ("TotalEquity", "NetEquityForMargin", "Equity", "AccountValue"):
+            val = data.get(key)
+            if val is not None:
+                try:
+                    return float(val)
+                except Exception:
+                    return None
+        return None
+
+
+    def precheck_order(self, instrument, side: str, units: int) -> Optional[float]:
+        uic = self._resolve_uic(instrument)
+        if uic is None or not self.account_key:
+            return None
+        buy_sell = "Buy" if str(side).upper() in ("LONG", "BUY") else "Sell"
+        amount = abs(int(units))
+        payload = {
+            "AccountKey": self.account_key,
+            "Uic": uic,
+            "AssetType": "FxSpot",
+            "Amount": amount,
+            "BuySell": buy_sell,
+            "OrderType": "Market",
+        }
+        url = f"{self.base_url}/trade/v2/orders/precheck"
+        try:
+            response = requests.post(url, headers=self._headers(), data=json.dumps(payload), timeout=10)
+            if response.status_code >= 400:
+                return None
+            data = response.json()
+            for key in ("MarginRequirement", "MarginRequired"):
+                val = data.get(key)
+                if val is not None:
+                    return float(val)
+        except Exception:
+            return None
+        return None
+
 
     def get_price(self, instrument) -> BrokerResult:
         uic = self._resolve_uic(instrument)
@@ -99,7 +151,7 @@ class SaxoBroker:
             if response.status_code >= 400:
                 return {}
             data = response.json()
-            positions: Dict[str, int] = {}
+            positions: Dict[int, int] = {}
             for item in data.get("Data", []) if isinstance(data, dict) else []:
                 uic = item.get("Uic")
                 amount = None
@@ -108,22 +160,18 @@ class SaxoBroker:
                     amount = base.get("Amount")
                 if uic is None or amount is None:
                     continue
-                pair = self._resolve_pair(int(uic))
-                if not pair:
-                    continue
-                positions[pair] = int(float(amount))
+                positions[int(uic)] = int(float(amount))
             self._positions_cache = positions
             return positions
         except Exception:
             return {}
 
     def get_open_position_units(self, instrument) -> int:
-        key = str(instrument).upper() if instrument is not None else None
-        if key and key in self._positions_cache:
-            return self._positions_cache[key]
+        if instrument in self._positions_cache:
+            return self._positions_cache[instrument]
         positions = self.refresh_positions()
-        if key and key in positions:
-            return positions[key]
+        if instrument in positions:
+            return positions[instrument]
         return 0
 
     def place_market_order(

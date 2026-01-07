@@ -63,6 +63,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             sl_price REAL,
             tp_price REAL,
             signal_id TEXT,
+            direction TEXT,
+            instrument TEXT,
+            uic INTEGER,
+            asset_type TEXT,
+            signal_timestamp TEXT,
             created_at TEXT NOT NULL
         );
         """
@@ -73,6 +78,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # Backfill columns if the table already existed
     existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(parsed_events)").fetchall()}
     for col_def in [
+        ("direction", "TEXT"),
+        ("instrument", "TEXT"),
+        ("uic", "INTEGER"),
+        ("asset_type", "TEXT"),
+        ("signal_timestamp", "TEXT"),
         ("entry_price", "REAL"),
         ("sl_price", "REAL"),
         ("tp_price", "REAL"),
@@ -81,6 +91,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         col_name, col_type = col_def
         if col_name not in existing_cols:
             cur.execute(f"ALTER TABLE parsed_events ADD COLUMN {col_name} {col_type};")
+
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS daily_equity (date_key TEXT PRIMARY KEY, equity REAL NOT NULL, created_at TEXT NOT NULL);"
+    )
 
     # Track executions to avoid double-firing broker orders
     cur.execute(
@@ -141,6 +155,11 @@ def insert_parsed_event(
     sl_price: Optional[float],
     tp_price: Optional[float],
     signal_id: Optional[str],
+    direction: Optional[str],
+    instrument: Optional[str],
+    uic: Optional[int],
+    asset_type: Optional[str],
+    signal_timestamp: Optional[str],
 ) -> bool:
     """Insert parsed segment; return True if inserted, False if duplicate."""
     cur = conn.cursor()
@@ -151,9 +170,10 @@ def insert_parsed_event(
                 scraped_at, segment_hash, segment_text, is_trading,
                 pair, action, side, lot_ratio, is_add,
                 entry_price, sl_price, tp_price, signal_id,
+                direction, instrument, uic, asset_type, signal_timestamp,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 scraped_at,
@@ -169,6 +189,11 @@ def insert_parsed_event(
                 sl_price,
                 tp_price,
                 signal_id,
+                direction,
+                instrument,
+                uic,
+                asset_type,
+                signal_timestamp,
                 utcnow(),
             ),
         )
@@ -325,3 +350,32 @@ def list_executions(conn: sqlite3.Connection, limit: int = 100) -> List[Dict[str
         (limit,),
     )
     return _rows_to_dicts(cur.fetchall())
+
+
+def was_executed_recent(conn: sqlite3.Connection, segment_hash: str, broker: str, window_seconds: int) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT created_at FROM executed_orders WHERE segment_hash = ? AND broker = ? ORDER BY datetime(created_at) DESC LIMIT 1", (segment_hash, broker))
+    row = cur.fetchone()
+    if not row:
+        return False
+    try:
+        created_at = datetime.fromisoformat(row["created_at"])
+    except Exception:
+        return False
+    return (datetime.now(timezone.utc) - created_at).total_seconds() <= window_seconds
+
+def get_recent_executions(conn: sqlite3.Connection, broker: str, limit: int = 3) -> List[Dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM executed_orders WHERE broker = ? ORDER BY datetime(created_at) DESC LIMIT ?", (broker, limit))
+    return _rows_to_dicts(cur.fetchall())
+
+def get_daily_equity(conn: sqlite3.Connection, date_key: str) -> Optional[float]:
+    cur = conn.cursor()
+    cur.execute("SELECT equity FROM daily_equity WHERE date_key = ? LIMIT 1", (date_key,))
+    row = cur.fetchone()
+    return float(row["equity"]) if row else None
+
+def set_daily_equity(conn: sqlite3.Connection, date_key: str, equity: float) -> None:
+    cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO daily_equity (date_key, equity, created_at) VALUES (?, ?, ?)", (date_key, equity, utcnow()))
+    conn.commit()

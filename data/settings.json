@@ -1,0 +1,12 @@
+{
+  "poll_interval": 15,
+  "allowed_pairs": [
+    "USDJPY",
+    "EURUSD"
+  ],
+  "max_lot_cap": 1,
+  "dedup_window": 30,
+  "dry_run": true,
+  "running": true,
+  "headless_scrape": true
+}

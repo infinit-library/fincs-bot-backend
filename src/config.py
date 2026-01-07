@@ -12,7 +12,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "dry_run": True,
     "running": False,
     "base_units_per_lot": 100000,  # FX standard lot size
-    "broker": "oanda",
+    "broker": "saxo",
     "max_slippage": 0.0005,  # 0.5 pip for most majors
     "max_spread": 0.0008,  # 0.8 pip guard
     "price_retries": 2,
@@ -20,6 +20,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "max_open_positions": 5,
     "max_total_units": 500000,
     "headless_scrape": True,
+    "saxo_uic_map": {},
 }
 
 

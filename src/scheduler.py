@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from .config import DEFAULT_SETTINGS, load_settings
+from src import config as runtime_config
 from .executor import run_execution_cycle
 from .storage import connect_db, get_latest_snapshot, DB_PATH
 
@@ -42,7 +42,7 @@ def run_scheduler(stop_event: threading.Event) -> None:
     global _last_attempt, _last_success, _last_error
 
     while not stop_event.is_set():
-        settings = load_settings()
+        settings = runtime_config.load_settings()
         if settings.get("running", False):
             import os
 
@@ -72,5 +72,5 @@ def run_scheduler(stop_event: threading.Event) -> None:
             except Exception as exc:
                 # keep loop alive; surface last error
                 _last_error = _last_error or str(exc)
-        poll = max(5, int(settings.get("poll_interval", DEFAULT_SETTINGS["poll_interval"])))
+        poll = max(5, int(settings.get("poll_interval", runtime_config.DEFAULT_SETTINGS["poll_interval"])))
         stop_event.wait(poll)

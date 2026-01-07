@@ -1,8 +1,8 @@
 import json
 from typing import Any, Dict, List, Optional
 
-from .broker import BrokerResult, get_broker, to_oanda_instrument
-from .config import DEFAULT_SETTINGS, load_settings
+from .broker import BrokerResult, get_broker
+from src import config as runtime_config
 from .storage import (
     DB_PATH,
     connect_db,
@@ -26,15 +26,15 @@ def _compute_units(side: str, lot_ratio: Optional[float], base_units_per_lot: in
 def execute_pending_signals(
     broker_name: str,
     dry_run: bool = True,
-    base_units_per_lot: int = DEFAULT_SETTINGS["base_units_per_lot"],
-    max_lot_cap: float = DEFAULT_SETTINGS["max_lot_cap"],
+    base_units_per_lot: int = runtime_config.DEFAULT_SETTINGS["base_units_per_lot"],
+    max_lot_cap: float = runtime_config.DEFAULT_SETTINGS["max_lot_cap"],
     allowed_pairs: Optional[List[str]] = None,
-    max_slippage: float = DEFAULT_SETTINGS["max_slippage"],
-    max_spread: float = DEFAULT_SETTINGS.get("max_spread", 0.0008),
-    price_retries: int = DEFAULT_SETTINGS.get("price_retries", 2),
-    conflict_policy: str = DEFAULT_SETTINGS.get("conflict_policy", "skip"),
-    max_open_positions: int = DEFAULT_SETTINGS.get("max_open_positions", 5),
-    max_total_units: int = DEFAULT_SETTINGS.get("max_total_units", 500000),
+    max_slippage: float = runtime_config.DEFAULT_SETTINGS["max_slippage"],
+    max_spread: float = runtime_config.DEFAULT_SETTINGS.get("max_spread", 0.0008),
+    price_retries: int = runtime_config.DEFAULT_SETTINGS.get("price_retries", 2),
+    conflict_policy: str = runtime_config.DEFAULT_SETTINGS.get("conflict_policy", "skip"),
+    max_open_positions: int = runtime_config.DEFAULT_SETTINGS.get("max_open_positions", 5),
+    max_total_units: int = runtime_config.DEFAULT_SETTINGS.get("max_total_units", 500000),
 ) -> Dict[str, Any]:
     broker = get_broker(broker_name)
     conn = connect_db(DB_PATH)
@@ -93,7 +93,7 @@ def execute_pending_signals(
 
         try:
             units = _compute_units(side, lot_ratio, base_units_per_lot, max_lot_cap)
-            instrument = to_oanda_instrument(pair)
+            instrument = pair.upper() if isinstance(pair, str) else pair
 
             # Conflict rule
             existing_units = broker_positions.get(instrument) if instrument in broker_positions else broker.get_open_position_units(instrument)
@@ -195,23 +195,23 @@ def execute_pending_signals(
 
 
 def run_execution_cycle() -> Dict[str, Any]:
-    settings = load_settings()
+    settings = runtime_config.load_settings()
     return execute_pending_signals(
-        broker_name=settings.get("broker", DEFAULT_SETTINGS["broker"]),
+        broker_name=settings.get("broker", runtime_config.DEFAULT_SETTINGS["broker"]),
         dry_run=bool(settings.get("dry_run", True)),
-        base_units_per_lot=int(settings.get("base_units_per_lot", DEFAULT_SETTINGS["base_units_per_lot"])),
-        max_lot_cap=float(settings.get("max_lot_cap", DEFAULT_SETTINGS["max_lot_cap"])),
+        base_units_per_lot=int(settings.get("base_units_per_lot", runtime_config.DEFAULT_SETTINGS["base_units_per_lot"])),
+        max_lot_cap=float(settings.get("max_lot_cap", runtime_config.DEFAULT_SETTINGS["max_lot_cap"])),
         allowed_pairs=settings.get("allowed_pairs"),
-        max_slippage=float(settings.get("max_slippage", DEFAULT_SETTINGS["max_slippage"])),
-        max_spread=float(settings.get("max_spread", DEFAULT_SETTINGS["max_spread"])),
-        price_retries=int(settings.get("price_retries", DEFAULT_SETTINGS["price_retries"])),
-        conflict_policy=settings.get("conflict_policy", DEFAULT_SETTINGS["conflict_policy"]),
-        max_open_positions=settings.get("max_open_positions", DEFAULT_SETTINGS["max_open_positions"]),
-        max_total_units=settings.get("max_total_units", DEFAULT_SETTINGS["max_total_units"]),
+        max_slippage=float(settings.get("max_slippage", runtime_config.DEFAULT_SETTINGS["max_slippage"])),
+        max_spread=float(settings.get("max_spread", runtime_config.DEFAULT_SETTINGS["max_spread"])),
+        price_retries=int(settings.get("price_retries", runtime_config.DEFAULT_SETTINGS["price_retries"])),
+        conflict_policy=settings.get("conflict_policy", runtime_config.DEFAULT_SETTINGS["conflict_policy"]),
+        max_open_positions=settings.get("max_open_positions", runtime_config.DEFAULT_SETTINGS["max_open_positions"]),
+        max_total_units=settings.get("max_total_units", runtime_config.DEFAULT_SETTINGS["max_total_units"]),
     )
 
 
-def run_loop(poll_interval: int = DEFAULT_SETTINGS["poll_interval"]) -> None:
+def run_loop(poll_interval: int = runtime_config.DEFAULT_SETTINGS["poll_interval"]) -> None:
     """
     Simple scheduler loop that runs execution every poll_interval seconds.
     Assumes scraper populates DB out-of-band.

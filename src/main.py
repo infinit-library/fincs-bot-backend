@@ -1,48 +1,33 @@
-from dotenv import load_dotenv
-load_dotenv()
-
-from src.config.settings import load_saxo_settings
+from src.config.setting import SaxoSettings
 from src.auth.saxo_oauth import SaxoOAuthClient
-from src.brokers.saxo import SaxoBroker
 
 
 def main():
-    print("Starting Saxo OpenAPI test (SIM environment)")
+    settings = SaxoSettings.from_env()
 
-    settings = load_saxo_settings()
+    print(f"Starting Saxo OpenAPI test ({settings.environment.upper()} environment)\n")
+
     oauth = SaxoOAuthClient(settings)
 
-    print("\n⚠️ OAuth authorization required")
-    print("Open this URL in your browser:\n")
-    print(
-        f"https://connect.saxobank.com/authorize?"
-        f"response_type=code&client_id={settings.client_id}"
+    # Step 1: show authorization URL
+    auth_url = (
+        f"{settings.auth_base}/authorize?"
+        f"response_type=code"
+        f"&client_id={settings.client_id}"
         f"&redirect_uri={settings.redirect_uri}"
     )
 
-    code = input("\nPaste authorization code here: ").strip()
+    print("⚠️ OAuth authorization required")
+    print("Open this URL in your browser:\n")
+    print(auth_url)
+    print()
 
-    try:
-        oauth.authenticate(code)
-        print("✅ OAuth authentication successful")
-    except Exception as e:
-        print("❌ OAuth failed:", e)
-        return
+    # Step 2: user pastes ?code=XXXX value
+    code = input("Paste authorization code here: ").strip()
 
-    broker = SaxoBroker(oauth, settings)
+    oauth.authenticate(code)
 
-    try:
-        accounts = broker.get_accounts()
-        balances = broker.get_balance()
-    except Exception as e:
-        print("❌ API request failed:", e)
-        return
-
-    print("\nAccounts:")
-    print(accounts)
-
-    print("\nBalances:")
-    print(balances)
+    print("\n🎉 Saxo OAuth setup completed successfully!")
 
 
 if __name__ == "__main__":

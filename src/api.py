@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import threading
 
-from .config import DEFAULT_SETTINGS, load_settings, save_settings
+from src import config as runtime_config
 from .executor import list_recent_orders, run_execution_cycle
 from .storage import (
     DB_PATH,
@@ -47,10 +47,10 @@ def init_db() -> None:
     conn.close()
 
     # Auto-start scraping on server boot
-    settings = load_settings()
+    settings = runtime_config.load_settings()
     if not settings.get("running", False):
         settings["running"] = True
-        save_settings(settings)
+        runtime_config.save_settings(settings)
     _start_scheduler_if_needed()
 
 
@@ -60,7 +60,7 @@ def status() -> Dict[str, Any]:
     latest = get_latest_snapshot(conn)
     latest_signal: Optional[Dict[str, Any]] = get_latest_trading_event(conn)
 
-    settings = load_settings()
+    settings = runtime_config.load_settings()
 
     running = bool(settings.get("running", False))
     last_scrape = None
@@ -91,9 +91,9 @@ def status() -> Dict[str, Any]:
 
 @app.post("/bot/start")
 def bot_start() -> Dict[str, str]:
-    settings = load_settings()
+    settings = runtime_config.load_settings()
     settings["running"] = True
-    save_settings(settings)
+    runtime_config.save_settings(settings)
     # kick scheduler thread if not running
     global _bg_thread
     if _bg_thread is None or not _bg_thread.is_alive():
@@ -105,9 +105,9 @@ def bot_start() -> Dict[str, str]:
 
 @app.post("/bot/stop")
 def bot_stop() -> Dict[str, str]:
-    settings = load_settings()
+    settings = runtime_config.load_settings()
     settings["running"] = False
-    save_settings(settings)
+    runtime_config.save_settings(settings)
     _stop_event.set()
     return {"status": "stopped"}
 
@@ -148,17 +148,17 @@ def list_raw(limit: int = 100) -> List[Dict[str, Any]]:
 
 @app.get("/settings")
 def get_settings() -> Dict[str, Any]:
-    return load_settings()
+    return runtime_config.load_settings()
 
 
 @app.post("/settings")
 def update_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Persist non-secret config; secrets should stay in env or upstream vault.
-    allowed_keys = set(DEFAULT_SETTINGS.keys())
+    allowed_keys = set(runtime_config.DEFAULT_SETTINGS.keys())
     filtered = {k: v for k, v in payload.items() if k in allowed_keys}
     if not filtered:
         raise HTTPException(status_code=400, detail="No valid settings supplied")
-    return save_settings(filtered)
+    return runtime_config.save_settings(filtered)
 
 
 @app.get("/stats")

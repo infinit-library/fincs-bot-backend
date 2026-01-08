@@ -40,7 +40,7 @@ def main() -> None:
     load_dotenv(override=True)
     settings = SaxoSettings.from_env()
 
-    refresh_token = os.getenv("SAXO_REFRESH_TOKEN")
+    refresh_token = os.getenv("SAXO_REFRESH_TOKEN") or os.getenv("SAXO_ACCESS_REFRESH_TOKEN")
     if not refresh_token:
         raise SystemExit("Missing SAXO_REFRESH_TOKEN in .env")
 

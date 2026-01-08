@@ -96,6 +96,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS daily_equity (date_key TEXT PRIMARY KEY, equity REAL NOT NULL, created_at TEXT NOT NULL);"
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS baseline_lots (
+            instrument TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            baseline_units INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (instrument, direction)
+        );
+        """
+    )
+
     # Track executions to avoid double-firing broker orders
     cur.execute(
         """
@@ -378,4 +390,24 @@ def get_daily_equity(conn: sqlite3.Connection, date_key: str) -> Optional[float]
 def set_daily_equity(conn: sqlite3.Connection, date_key: str, equity: float) -> None:
     cur = conn.cursor()
     cur.execute("INSERT OR REPLACE INTO daily_equity (date_key, equity, created_at) VALUES (?, ?, ?)", (date_key, equity, utcnow()))
+    conn.commit()
+
+
+def get_baseline_units(conn: sqlite3.Connection, instrument: str, direction: str) -> Optional[int]:
+    cur = conn.cursor()
+    cur.execute("SELECT baseline_units FROM baseline_lots WHERE instrument = ? AND direction = ?", (instrument, direction))
+    row = cur.fetchone()
+    return int(row["baseline_units"]) if row else None
+
+def set_baseline_units(conn: sqlite3.Connection, instrument: str, direction: str, units: int) -> None:
+    cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO baseline_lots (instrument, direction, baseline_units, created_at) VALUES (?, ?, ?, ?)", (instrument, direction, int(units), utcnow()))
+    conn.commit()
+
+def clear_baseline_units(conn: sqlite3.Connection, instrument: str, direction: Optional[str] = None) -> None:
+    cur = conn.cursor()
+    if direction:
+        cur.execute("DELETE FROM baseline_lots WHERE instrument = ? AND direction = ?", (instrument, direction))
+    else:
+        cur.execute("DELETE FROM baseline_lots WHERE instrument = ?", (instrument,))
     conn.commit()

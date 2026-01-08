@@ -2,6 +2,7 @@ import json
 from typing import Dict, Optional
 
 import requests
+import os
 
 from src.auth.saxo_oauth import SaxoOAuthClient
 from src.config.setting import SaxoSettings
@@ -59,7 +60,9 @@ class SaxoBroker:
     def get_equity(self) -> Optional[float]:
         try:
             data = self.get_balance()
-        except Exception:
+        except Exception as exc:
+            if os.getenv("SAXO_DEBUG_PRECHECK", "").lower() == "true":
+                print(f"PRECHECK exception: {exc}")
             return None
         if not isinstance(data, dict):
             return None
@@ -86,18 +89,31 @@ class SaxoBroker:
             "Amount": amount,
             "BuySell": buy_sell,
             "OrderType": "Market",
+            "ManualOrder": True,
         }
+        if self.client_key:
+            payload["ClientKey"] = self.client_key
+        if self.client_key:
+            payload["ClientKey"] = self.client_key
         url = f"{self.base_url}/trade/v2/orders/precheck"
         try:
-            response = requests.post(url, headers=self._headers(), data=json.dumps(payload), timeout=10)
+            response = requests.post(url, headers=self._headers(), json=payload, timeout=10)
             if response.status_code >= 400:
+                if os.getenv("SAXO_DEBUG_PRECHECK", "").lower() == "true":
+                    print(f"PRECHECK {response.status_code}: {response.text}")
                 return None
             data = response.json()
+            if isinstance(data, dict) and data.get("ErrorInfo"):
+                if os.getenv("SAXO_DEBUG_PRECHECK", "").lower() == "true":
+                    print(f"PRECHECK error: {data.get("ErrorInfo")}")
+                return None
             for key in ("MarginRequirement", "MarginRequired"):
                 val = data.get(key)
                 if val is not None:
                     return float(val)
-        except Exception:
+        except Exception as exc:
+            if os.getenv("SAXO_DEBUG_PRECHECK", "").lower() == "true":
+                print(f"PRECHECK exception: {exc}")
             return None
         return None
 
@@ -200,7 +216,12 @@ class SaxoBroker:
             "Amount": amount,
             "BuySell": buy_sell,
             "OrderType": "Market",
+            "ManualOrder": True,
         }
+        if self.client_key:
+            payload["ClientKey"] = self.client_key
+        if self.client_key:
+            payload["ClientKey"] = self.client_key
         if client_id:
             payload["ExternalReference"] = str(client_id)
 
@@ -209,7 +230,7 @@ class SaxoBroker:
 
         url = f"{self.base_url}/trade/v2/orders"
         try:
-            response = requests.post(url, headers=self._headers(), data=json.dumps(payload), timeout=10)
+            response = requests.post(url, headers=self._headers(), json=payload, timeout=10)
             if response.status_code >= 400:
                 return BrokerResult(False, None, f"{response.status_code}: {response.text}", payload)
             data = response.json()

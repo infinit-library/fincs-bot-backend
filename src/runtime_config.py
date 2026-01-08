@@ -9,8 +9,12 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "allowed_pairs": ["USDJPY", "EURUSD"],
     "max_lot_cap": 1.0,
     "dedup_window": 30,
+    "signal_freshness_seconds": 180,
     "dry_run": True,
     "running": False,
+    "strict_mode": True,
+    "allow_market_without_prices": False,
+    "process_last_n": 0,
     "base_units_per_lot": 100000,  # FX standard lot size
     "broker": "saxo",
     "max_slippage": 0.0005,  # 0.5 pip for most majors

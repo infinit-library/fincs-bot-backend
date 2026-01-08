@@ -6,6 +6,16 @@ from pathlib import Path
 from .storage import connect_db, get_all_trading_events, get_events_by_pair, get_latest_snapshot, get_event_statistics
 
 
+
+def safe_print(text: str) -> None:
+    """Print text safely on Windows consoles that may not support Unicode."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        print(text.encode(encoding, errors="backslashreplace").decode(encoding))
+
+
 def print_separator(title: str = ""):
     """Print a separator line with optional title."""
     if title:
@@ -49,12 +59,12 @@ def show_latest_snapshot(db_path: str):
     if snapshot:
         print(f"\nID: {snapshot['id']}")
         print(f"Scraped At: {snapshot['scraped_at']}")
-        print(f"Channel: {snapshot['channel']}")
+        safe_print(f"Channel: {snapshot['channel']}")
         print(f"Hash: {snapshot['raw_hash'][:16]}...")
         print(f"Text Length: {len(snapshot['raw_text'])} characters")
         print(f"\nFirst 500 characters of raw text:")
         print_separator()
-        print(snapshot['raw_text'][:500])
+        safe_print(snapshot['raw_text'][:500])
         if len(snapshot['raw_text']) > 500:
             print("...")
     else:
@@ -80,7 +90,7 @@ def show_trading_events(db_path: str, limit: int = 20):
             print(f"Side: {event['side'] or 'N/A'}")
             print(f"Lot Ratio: {event['lot_ratio'] or 'N/A'}")
             print(f"Is Add: {'Yes' if event['is_add'] else 'No'}")
-            print(f"\nText:\n{event['segment_text']}")
+            safe_print(f"\nText:\n{event['segment_text']}")
     else:
         print("\nNo trading events found in database.")
     
@@ -103,7 +113,7 @@ def show_events_by_pair(db_path: str, pair: str, limit: int = 20):
             print(f"Side: {event['side'] or 'N/A'}")
             print(f"Lot Ratio: {event['lot_ratio'] or 'N/A'}")
             print(f"Is Add: {'Yes' if event['is_add'] else 'No'}")
-            print(f"\nText:\n{event['segment_text']}")
+            safe_print(f"\nText:\n{event['segment_text']}")
     else:
         print(f"\nNo trading events found for {pair}.")
     

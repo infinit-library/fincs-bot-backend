@@ -8,5 +8,15 @@
   "dedup_window": 30,
   "dry_run": true,
   "running": true,
-  "headless_scrape": true
+  "headless_scrape": false,
+  "broker": "saxo",
+  "saxo_uic_map": {
+    "EURUSD": 21,
+    "USDJPY": 22,
+    "GBPUSD": 23
+  },
+  "signal_freshness_seconds": 0,
+  "process_last_n": 0,
+  "strict_mode": false,
+  "allow_market_without_prices": true
 }

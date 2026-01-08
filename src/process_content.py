@@ -1,6 +1,7 @@
 import re
 from typing import Optional
 
+from src import runtime_config
 from .storage import DB_PATH, connect_db, insert_parsed_event, insert_raw_snapshot, sha256_text, utcnow
 
 
@@ -14,22 +15,19 @@ PAIR_LIST = [
     "NZDUSD",
     "USDCAD",
     "USDCHF",
-    "XAUUSD",
-    "XAGUSD",
 ]
 
-# Japanese aliases to canonical symbols
 JP_PAIR_MAP = {
-    "ドル円": "USDJPY",
     "ドル/円": "USDJPY",
-    "米ドル円": "USDJPY",
-    "ユーロドル": "EURUSD",
-    "ユロドル": "EURUSD",
+    "ドル円": "USDJPY",
     "ユーロ/ドル": "EURUSD",
+    "ユーロドル": "EURUSD",
+    "ポンド/ドル": "GBPUSD",
     "ポンドドル": "GBPUSD",
-    "ポン円": "GBPJPY",
-    "ポンド円": "GBPJPY",
+    "ユーロ/円": "EURJPY",
     "ユーロ円": "EURJPY",
+    "ポンド/円": "GBPJPY",
+    "ポンド円": "GBPJPY",
 }
 
 
@@ -38,47 +36,22 @@ def split_into_segments(raw_text: str) -> list[str]:
     return [s.strip() for s in raw_text.split("---") if s.strip()]
 
 
-def _normalize_text(s: str) -> str:
-    # Normalize to simplify regex parsing: upper-case, ASCII digits.
-    fullwidth_digits = str.maketrans("０１２３４５６７８９．，", "0123456789.,")
-    return s.translate(fullwidth_digits).upper()
+def _normalize_digits(s: str) -> str:
+    trans = str.maketrans("０１２３４５６７８９％", "0123456789%")
+    return s.translate(trans)
 
 
-def _parse_direction(text: str) -> Optional[str]:
-    m = re.search(r"\b(?:DIRECTION|SIDE)\s*[:=]\s*(BUY|SELL)\b", text, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).upper()
-    return None
-
-
-def _parse_instrument(text: str) -> Optional[str]:
-    m = re.search(r"\bINSTRUMENT\s*[:=]\s*([A-Z]{3}/[A-Z]{3}|[A-Z]{6})\b", text, flags=re.IGNORECASE)
-    if not m:
-        return None
-    return m.group(1).upper()
-
-
-def _parse_uic(text: str) -> Optional[int]:
-    m = re.search(r"\bUIC\s*[:=]\s*(\d+)\b", text, flags=re.IGNORECASE)
-    if not m:
-        return None
-    try:
-        return int(m.group(1))
-    except Exception:
-        return None
-
-
-def _parse_asset_type(text: str) -> Optional[str]:
-    m = re.search(r"\bASSET[_ ]?TYPE\s*[:=]\s*(FxSpot)\b", text, flags=re.IGNORECASE)
-    if m:
-        return "FxSpot"
-    return None
-
-
-def _parse_signal_timestamp(text: str) -> Optional[str]:
-    m = re.search(r"\bTIMESTAMP\s*[:=]\s*([0-9T:\-+.Z]+|\d{10})\b", text, flags=re.IGNORECASE)
-    if m:
-        return m.group(1)
+def _extract_signal_line(seg: str) -> Optional[str]:
+    arrow = "→"
+    keywords = ("エントリー", "利確", "損切り", "ロング", "ショート", "買い", "売り")
+    for line in (seg or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if arrow not in stripped and "->" not in stripped:
+            continue
+        if any(k in stripped for k in keywords):
+            return stripped
     return None
 
 
@@ -86,134 +59,123 @@ def _parse_pair(text: str) -> Optional[str]:
     for p in PAIR_LIST:
         if re.search(rf"\b{p}\b", text, flags=re.IGNORECASE):
             return p
-    # Japanese aliases (search on original text too)
     for jp, sym in JP_PAIR_MAP.items():
         if jp in text:
             return sym
     return None
 
 
-def _parse_side(text: str) -> Optional[str]:
-    if re.search(r"\b(BUY|LONG)\b", text, re.IGNORECASE):
-        return "LONG"
-    if re.search(r"\b(SELL|SHORT)\b", text, re.IGNORECASE):
-        return "SHORT"
-    if "ロング" in text or "買い" in text:
-        return "LONG"
-    if "ショート" in text or "売り" in text:
-        return "SHORT"
+def _parse_direction(text: str) -> Optional[str]:
+    if re.search(r"\b(SELL|SHORT)\b", text, re.IGNORECASE) or "ショート" in text or "売り" in text:
+        return "SELL"
+    if re.search(r"\b(BUY|LONG)\b", text, re.IGNORECASE) or "ロング" in text or "買い" in text:
+        return "BUY"
     return None
 
 
-def _parse_prices(text: str) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    entry = sl = tp = None
-
-    def first_float(pattern: str) -> Optional[float]:
-        m = re.search(pattern, text, flags=re.IGNORECASE)
-        if m:
-            try:
-                return float(m.group(1).replace(",", ""))
-            except Exception:
-                return None
-        return None
-
-    entry = first_float(r"(?:ENTRY|@|INTO|AT|エントリー)\s*([0-9]+(?:\.[0-9]+)?)")
-    sl = first_float(r"(?:SL|STOP(?:\s*LOSS)?|S/L|損切り|ロスカット)\s*([0-9]+(?:\.[0-9]+)?)")
-    tp = first_float(r"(?:TP|TAKE\s*PROFIT|T/P|利確|利食い)\s*([0-9]+(?:\.[0-9]+)?)")
-
-    # Fallback: if exactly three numbers appear, guess order: entry, tp, sl
-    if not (entry and sl and tp):
-        nums = [float(n.replace(",", "")) for n in re.findall(r"[0-9]+(?:\.[0-9]+)?", text)]
-        if len(nums) == 3 and entry is None:
-            entry, tp, sl = nums
-    return entry, sl, tp
+def _parse_action(text: str) -> Optional[str]:
+    if "利確" in text:
+        return "CLOSE_TP"
+    if "損切り" in text:
+        return "CLOSE_SL"
+    if "エントリー" in text or re.search(r"\bENTRY\b", text, re.IGNORECASE):
+        return "ENTRY"
+    return None
 
 
 def _parse_lot_ratio(text: str) -> Optional[float]:
-    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(LOT|LOTS)", text, flags=re.IGNORECASE)
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except Exception:
-        return None
+    norm = _normalize_digits(text)
+    m = re.search(r"最大ロットの\s*([0-9]+(?:\.[0-9]+)?)\s*割", norm)
+    if m:
+        try:
+            return float(m.group(1)) / 10.0
+        except Exception:
+            return None
+    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*%", norm)
+    if m:
+        try:
+            return float(m.group(1)) / 100.0
+        except Exception:
+            return None
+    return None
 
 
-def classify_and_parse(seg: str) -> dict:
-    """
-    Classify each atomic segment as trading/non-trading and parse fields.
-    """
-    s = (seg or '').strip()
-    norm = _normalize_text(s)
-    lower = s.lower()
+def _is_add(text: str) -> bool:
+    return "(追加)" in text or "（追加）" in text
 
-    pair = _parse_pair(norm)
-    side = _parse_side(norm)
-    entry_price, sl_price, tp_price = _parse_prices(norm)
-    lot_ratio = _parse_lot_ratio(norm)
 
-    direction = _parse_direction(s)
-    instrument = _parse_instrument(s)
-    uic = _parse_uic(s)
-    asset_type = _parse_asset_type(s)
-    signal_timestamp = _parse_signal_timestamp(s)
+def _load_uic_map() -> dict:
+    settings = runtime_config.load_settings()
+    raw = settings.get("saxo_uic_map") or {}
+    return {str(k).upper().replace("/", ""): int(v) for k, v in raw.items()}
 
-    trading_hints = ['entry', '?????', '??', '???', 'take profit', 'tp', 'sl', 'stop', '??']
-    has_hint = any(h in lower for h in trading_hints)
 
-    # Require explicit structured fields for executable signals.
-    is_trading = bool(direction and instrument and uic is not None and asset_type == "FxSpot" and signal_timestamp)
-    action = 'ENTRY' if is_trading else None
-    is_add = 'ADD' in norm or '??' in s  # lightweight add-on marker
+def classify_and_parse(seg: str, scraped_at: str, uic_map: dict) -> dict:
+    line = _extract_signal_line(seg)
+    if not line:
+        return {"is_trading": False}
 
-    signal_id = None
-    m_id = re.search(r"ID[:\s]*([A-Z0-9\-]+)", norm)
-    if m_id:
-        signal_id = m_id.group(1)
+    pair = _parse_pair(line)
+    instrument = pair
+    direction = _parse_direction(line)
+    action = _parse_action(line)
+    lot_ratio = _parse_lot_ratio(line)
+    is_add = _is_add(line)
+
+    if not action or not instrument:
+        return {"is_trading": False}
+
+    norm_instrument = instrument.upper().replace("/", "")
+    uic = uic_map.get(norm_instrument)
+    if uic is None:
+        return {"is_trading": False}
+
+    if action == "ENTRY" and (direction is None or lot_ratio is None):
+        return {"is_trading": False}
+
+    side = "LONG" if direction == "BUY" else "SHORT" if direction == "SELL" else None
 
     return {
-        'is_trading': is_trading,
-        'pair': pair,
-        'action': action,
-        'side': side,
-        'lot_ratio': lot_ratio,
-        'is_add': is_add,
-        'entry_price': entry_price,
-        'sl_price': sl_price,
-        'tp_price': tp_price,
-        'signal_id': signal_id,
-        'direction': direction,
-        'instrument': instrument,
-        'uic': uic,
-        'asset_type': asset_type,
-        'signal_timestamp': signal_timestamp,
+        "is_trading": True,
+        "pair": norm_instrument,
+        "action": action,
+        "side": side,
+        "lot_ratio": lot_ratio,
+        "is_add": is_add,
+        "entry_price": None,
+        "sl_price": None,
+        "tp_price": None,
+        "signal_id": None,
+        "direction": direction,
+        "instrument": norm_instrument,
+        "uic": uic,
+        "asset_type": "FxSpot",
+        "signal_timestamp": scraped_at,
+        "segment_text": line,
     }
 
 
-
-def save_snapshot_and_segments(raw_text: str, channel: str = 'NOBU_CHANNEL'):
+def save_snapshot_and_segments(raw_text: str, channel: str = "NOBU_CHANNEL"):
     scraped_at = utcnow()
+    uic_map = _load_uic_map()
 
     conn = connect_db(DB_PATH)
 
-    # 1) Split and keep only trading-classified segments
     segments = split_into_segments(raw_text)
     trading_segments = []
     for seg in segments:
-        parsed = classify_and_parse(seg)
-        if parsed['is_trading']:
+        parsed = classify_and_parse(seg, scraped_at, uic_map)
+        if parsed.get("is_trading"):
             trading_segments.append((seg, parsed))
 
-    # If nothing is trading-related, skip inserts entirely.
     if not trading_segments:
         conn.close()
         return {
-            'segments_total': len(segments),
-            'inserted': 0,
-            'inserted_trading': 0,
+            "segments_total": len(segments),
+            "inserted": 0,
+            "inserted_trading": 0,
         }
 
-    # 2) Save raw snapshot (dedupe by raw_hash) only when trading content exists
     raw_hash = sha256_text(raw_text)
     insert_raw_snapshot(
         conn,
@@ -223,7 +185,6 @@ def save_snapshot_and_segments(raw_text: str, channel: str = 'NOBU_CHANNEL'):
         raw_text=raw_text,
     )
 
-    # 3) Save trading segments (dedupe by segment_hash)
     inserted = 0
     inserted_trading = 0
     for seg, parsed in trading_segments:
@@ -232,32 +193,32 @@ def save_snapshot_and_segments(raw_text: str, channel: str = 'NOBU_CHANNEL'):
             conn,
             scraped_at=scraped_at,
             segment_hash=seg_hash,
-            segment_text=seg,
-            is_trading=parsed['is_trading'],
-            pair=parsed['pair'],
-            action=parsed['action'],
-            side=parsed['side'],
-            lot_ratio=parsed['lot_ratio'],
-            is_add=parsed['is_add'],
-            entry_price=parsed['entry_price'],
-            sl_price=parsed['sl_price'],
-            tp_price=parsed['tp_price'],
-            signal_id=parsed['signal_id'],
-            direction=parsed['direction'],
-            instrument=parsed['instrument'],
-            uic=parsed['uic'],
-            asset_type=parsed['asset_type'],
-            signal_timestamp=parsed['signal_timestamp'],
+            segment_text=parsed.get("segment_text") or seg,
+            is_trading=parsed["is_trading"],
+            pair=parsed.get("pair"),
+            action=parsed.get("action"),
+            side=parsed.get("side"),
+            lot_ratio=parsed.get("lot_ratio"),
+            is_add=parsed.get("is_add"),
+            entry_price=parsed.get("entry_price"),
+            sl_price=parsed.get("sl_price"),
+            tp_price=parsed.get("tp_price"),
+            signal_id=parsed.get("signal_id"),
+            direction=parsed.get("direction"),
+            instrument=parsed.get("instrument"),
+            uic=parsed.get("uic"),
+            asset_type=parsed.get("asset_type"),
+            signal_timestamp=parsed.get("signal_timestamp"),
         )
         if did_insert:
             inserted += 1
-            if parsed['is_trading']:
+            if parsed["is_trading"]:
                 inserted_trading += 1
 
     conn.close()
 
     return {
-        'segments_total': len(segments),
-        'inserted': inserted,
-        'inserted_trading': inserted_trading,
+        "segments_total": len(segments),
+        "inserted": inserted,
+        "inserted_trading": inserted_trading,
     }

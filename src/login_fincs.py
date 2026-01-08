@@ -15,6 +15,36 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 from .process_content import save_snapshot_and_segments
 
+from pathlib import Path
+
+SCRAPE_LOCK_PATH = Path(__file__).resolve().parent.parent / "data" / "scrape.lock"
+
+
+def _acquire_lock():
+    if SCRAPE_LOCK_PATH.exists():
+        raise RuntimeError("Scraper already running (lock exists)")
+    SCRAPE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SCRAPE_LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+
+
+def _release_lock():
+    try:
+        SCRAPE_LOCK_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _safe_ascii(value):
+    if isinstance(value, str):
+        return value.encode("ascii", "backslashreplace").decode("ascii")
+    return value
+
+
+def safe_print(*args, **kwargs):
+    safe_args = [_safe_ascii(a) for a in args]
+    print(*safe_args, **kwargs)
+
+
 def js_click(driver, el):
     driver.execute_script(
         "arguments[0].scrollIntoView({block:'center'});", el
@@ -285,14 +315,14 @@ def open_talk_thread_by_title(driver, wait, title: str):
     Open a specific talk thread by visible title text, avoiding clicks on message bubbles.
     If already on the thread (title appears in header), this is a no-op.
     """
-    print(f"\n[DEBUG] Looking for talk thread: {title}")
+    safe_print(f"\n[DEBUG] Looking for talk thread: {title}")
     
     # Handle '&' vs '＆' differences by matching keywords
     keywords = [k.strip() for k in re.split(r"[&＆]", title) if k.strip()]
     if not keywords:
         keywords = [title]
     
-    print(f"[DEBUG] Keywords: {keywords}")
+    safe_print(f"[DEBUG] Keywords: {keywords}")
 
     # XPath that matches the title even if the ampersand differs (by requiring all keywords)
     kw_pred = " and ".join([f"contains(normalize-space(.),'{k}')" for k in keywords])
@@ -311,11 +341,11 @@ def open_talk_thread_by_title(driver, wait, title: str):
             return False
 
     if on_thread():
-        print("[DEBUG] Already on the thread page")
+        safe_print("[DEBUG] Already on the thread page")
         return
 
     # Try direct click strategies before scrolling
-    print("[DEBUG] Trying direct click strategies...")
+    safe_print("[DEBUG] Trying direct click strategies...")
     
     # Strategy 1: Look for clickable items (a, button, div with role) that contain all keywords
     try:
@@ -324,25 +354,25 @@ def open_talk_thread_by_title(driver, wait, title: str):
             f"[{kw_pred}]"
         )
         direct_candidates = driver.find_elements(By.XPATH, clickable_xpath)
-        print(f"[DEBUG] Found {len(direct_candidates)} direct clickable candidates")
+        safe_print(f"[DEBUG] Found {len(direct_candidates)} direct clickable candidates")
         for c in direct_candidates:
             if visible(c):
                 try:
-                    print(f"[DEBUG] Trying to click: {c.text[:50]}...")
+                    safe_print(f"[DEBUG] Trying to click: {c.text[:50]}...")
                     js_click(driver, c)
                     WebDriverWait(driver, 10).until(lambda d: on_thread())
-                    print("[DEBUG] Successfully opened thread!")
+                    safe_print("[DEBUG] Successfully opened thread!")
                     return
                 except Exception as e:
-                    print(f"[DEBUG] Click failed: {e}")
+                    safe_print(f"[DEBUG] Click failed: {e}")
                     continue
     except Exception as e:
-        print(f"[DEBUG] Direct click strategy failed: {e}")
+        safe_print(f"[DEBUG] Direct click strategy failed: {e}")
 
     # Strategy 2: Look for links/buttons with href or @click containing thread info
     try:
         all_links = driver.find_elements(By.CSS_SELECTOR, "a, button, [role='button']")
-        print(f"[DEBUG] Checking {len(all_links)} links/buttons for keyword matches...")
+        safe_print(f"[DEBUG] Checking {len(all_links)} links/buttons for keyword matches...")
         for link in all_links:
             if not visible(link):
                 continue
@@ -350,23 +380,23 @@ def open_talk_thread_by_title(driver, wait, title: str):
             # Check if all keywords are in the text
             if all(kw in link_text for kw in keywords):
                 try:
-                    print(f"[DEBUG] Found matching link: {link_text[:50]}...")
+                    safe_print(f"[DEBUG] Found matching link: {link_text[:50]}...")
                     js_click(driver, link)
                     WebDriverWait(driver, 10).until(lambda d: on_thread())
-                    print("[DEBUG] Successfully opened thread!")
+                    safe_print("[DEBUG] Successfully opened thread!")
                     return
                 except Exception as e:
-                    print(f"[DEBUG] Click failed: {e}")
+                    safe_print(f"[DEBUG] Click failed: {e}")
                     continue
     except Exception as e:
-        print(f"[DEBUG] Link iteration strategy failed: {e}")
+        safe_print(f"[DEBUG] Link iteration strategy failed: {e}")
 
     # Strategy 3: Scroll and search (original method with improvements)
-    print("[DEBUG] Starting scroll and search strategy...")
+    safe_print("[DEBUG] Starting scroll and search strategy...")
     scroll_el = None
     try:
         scroll_el = find_best_scroll_container(driver)
-        print(f"[DEBUG] Scroll container found: {scroll_el is not None}")
+        safe_print(f"[DEBUG] Scroll container found: {scroll_el is not None}")
     except Exception:
         scroll_el = None
 
@@ -405,7 +435,7 @@ def open_talk_thread_by_title(driver, wait, title: str):
         candidates = driver.find_elements(By.XPATH, title_anywhere_xpath)
         
         if iteration % 10 == 0:
-            print(f"[DEBUG] Iteration {iteration}: Found {len(candidates)} candidates")
+            safe_print(f"[DEBUG] Iteration {iteration}: Found {len(candidates)} candidates")
         
         for c in candidates:
             if not visible(c):
@@ -420,14 +450,14 @@ def open_talk_thread_by_title(driver, wait, title: str):
                 if parents:
                     clickable = parents[0]
                 
-                print(f"[DEBUG] Attempt {attempts}: Clicking candidate: {c.text[:50]}...")
+                safe_print(f"[DEBUG] Attempt {attempts}: Clicking candidate: {c.text[:50]}...")
                 js_click(driver, clickable)
                 WebDriverWait(driver, 10).until(lambda d: on_thread())
-                print("[DEBUG] Successfully opened thread!")
+                safe_print("[DEBUG] Successfully opened thread!")
                 return
             except Exception as e:
                 if iteration % 10 == 0:
-                    print(f"[DEBUG] Click attempt failed: {e}")
+                    safe_print(f"[DEBUG] Click attempt failed: {e}")
                 continue
 
         # Scroll and detect stagnation/bottom
@@ -453,18 +483,18 @@ def open_talk_thread_by_title(driver, wait, title: str):
         last_top = top_after if top_after is not None else top
 
         if stagnant >= 12:
-            print(f"[DEBUG] Reached bottom/stagnant after {iteration} iterations")
+            safe_print(f"[DEBUG] Reached bottom/stagnant after {iteration} iterations")
             break
 
     # Last resort: print all visible text to help debug
-    print("\n[DEBUG] Failed to find thread. Dumping visible clickable elements with partial matches:")
+    safe_print("\n[DEBUG] Failed to find thread. Dumping visible clickable elements with partial matches:")
     try:
         all_clickables = driver.find_elements(By.CSS_SELECTOR, "a, button, [role='button']")
         for elem in all_clickables[:50]:  # Limit to first 50
             if visible(elem):
                 text = (elem.text or "").strip()
                 if text and any(kw in text for kw in keywords):
-                    print(f"  - {text[:100]}")
+                    safe_print(f"  - {text[:100]}")
     except Exception:
         pass
 
@@ -472,6 +502,8 @@ def open_talk_thread_by_title(driver, wait, title: str):
 
 
 def main(auto_exit: bool = False):
+    _acquire_lock()
+    driver = None
     # ---- Load credentials ----
     load_dotenv()
     EMAIL = os.getenv("FINCS_EMAIL")
@@ -644,8 +676,8 @@ def main(auto_exit: bool = False):
                     time.sleep(0.6)
 
             time.sleep(1.0)
-            print("Clicked: この講座のトークページへ")
-            print("URL after click:", driver.current_url)
+            safe_print("Clicked: この講座のトークページへ")
+            safe_print("URL after click:", driver.current_url)
 
             # If we still didn't reach the talk tab, try clicking a "トーク" tab/button if present
             if "tab=talk" not in (driver.current_url or ""):
@@ -657,7 +689,7 @@ def main(auto_exit: bool = False):
                     )
                     js_click(driver, talk_tab)
                     WebDriverWait(driver, 15).until(lambda d: "tab=talk" in (d.current_url or ""))
-                    print("Switched to トーク tab via tab/button.")
+                    safe_print("Switched to トーク tab via tab/button.")
                 except Exception:
                     pass
         except Exception:
@@ -671,16 +703,16 @@ def main(auto_exit: bool = False):
         thread_wait = WebDriverWait(driver, 40)
         
         # Wait for talk list to load (look for any clickable items)
-        print("[DEBUG] Waiting for talk list to load...")
+        safe_print("[DEBUG] Waiting for talk list to load...")
         try:
             thread_wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "a, button, [role='button']"))
             )
             time.sleep(2)  # Extra time for virtualized list to render
-            print(f"[DEBUG] Current URL: {driver.current_url}")
-            print(f"[DEBUG] Page title: {driver.title}")
+            safe_print(f"[DEBUG] Current URL: {driver.current_url}")
+            safe_print(f"[DEBUG] Page title: {driver.title}")
         except Exception as e:
-            print(f"[DEBUG] Warning: Could not detect talk list elements: {e}")
+            safe_print(f"[DEBUG] Warning: Could not detect talk list elements: {e}")
         
         try:
             open_talk_thread_by_title(driver, thread_wait, talk_title)
@@ -697,7 +729,7 @@ def main(auto_exit: bool = False):
                     f"//*[contains(@class,'header') or contains(@class,'title') or contains(@class,'talk')][{kw_pred}]",
                 )
                 if any(visible(x) for x in already):
-                    print(f"Already on talk thread (detected by keywords): {talk_title}")
+                    safe_print(f"Already on talk thread (detected by keywords): {talk_title}")
                 else:
                     raise RuntimeError(
                         f"Failed to open talk thread '{talk_title}'. "
@@ -710,7 +742,7 @@ def main(auto_exit: bool = False):
                     f"Current URL={driver.current_url!r} Title={driver.title!r}. "
                     f"Original error: {e!r}"
                 )
-        print(f"Opened talk thread: {talk_title}")
+        safe_print(f"Opened talk thread: {talk_title}")
 
         # =========================================================
         # 7) TALK THREAD: collect all div.content.isText
@@ -727,13 +759,13 @@ def main(auto_exit: bool = False):
             # =========================================================
             # Split -> hash dedupe -> store -> classify immediately (trading vs non-trading)
             db_result = save_snapshot_and_segments(raw_text_for_db, channel=talk_title)
-            print("\n" + "=" * 80)
-            print("DATABASE SAVE RESULTS")
-            print("=" * 80)
-            print(f"Total segments: {db_result['segments_total']}")
-            print(f"New segments inserted: {db_result['inserted']}")
-            print(f"New trading signals: {db_result['inserted_trading']}")
-            print("=" * 80 + "\n")
+            safe_print("\n" + "=" * 80)
+            safe_print("DATABASE SAVE RESULTS")
+            safe_print("=" * 80)
+            safe_print(f"Total segments: {db_result['segments_total']}")
+            safe_print(f"New segments inserted: {db_result['inserted']}")
+            safe_print(f"New trading signals: {db_result['inserted_trading']}")
+            safe_print("=" * 80 + "\n")
 
             # =========================================================
             # OPTIONAL: BACKUP TO TEXT FILE (set to False to disable)
@@ -749,41 +781,45 @@ def main(auto_exit: bool = False):
                     for t in texts:
                         f.write(t.replace("\r\n", "\n").replace("\r", "\n"))
                         f.write("\n\n---\n\n")
-                print(f"[INFO] Text backup saved to: {out_path}\n")
+                safe_print(f"[INFO] Text backup saved to: {out_path}\n")
 
             # =========================================================
             # DISPLAY SUMMARY
             # =========================================================
-            print(f"[INFO] Collected {len(texts)} messages from talk thread")
-            print(f"[INFO] All data saved to SQLite database: data/fincs.db")
-            print(f"[INFO] Use 'python src/query_db.py stats' to view database statistics")
-            print(f"[INFO] Use 'python src/query_db.py events' to view recent trading events")
+            safe_print(f"[INFO] Collected {len(texts)} messages from talk thread")
+            safe_print(f"[INFO] All data saved to SQLite database: data/fincs.db")
+            safe_print(f"[INFO] Use 'python src/query_db.py stats' to view database statistics")
+            safe_print(f"[INFO] Use 'python src/query_db.py events' to view recent trading events")
             
             # Show first 5 messages as preview
-            print("\n" + "=" * 80)
-            print("PREVIEW: First 5 messages")
-            print("=" * 80)
+            safe_print("\n" + "=" * 80)
+            safe_print("PREVIEW: First 5 messages")
+            safe_print("=" * 80)
             for i, t in enumerate(texts[:5], start=1):
-                print(f"\n[{i}/{len(texts)}]")
-                print(t[:200] + ("..." if len(t) > 200 else ""))
-                print("-" * 80)
+                safe_print(f"\n[{i}/{len(texts)}]")
+                safe_print(t[:200] + ("..." if len(t) > 200 else ""))
+                safe_print("-" * 80)
             if len(texts) > 5:
-                print(f"\n... and {len(texts) - 5} more messages (stored in database)")
-            print("=" * 80 + "\n")
+                safe_print(f"\n... and {len(texts) - 5} more messages (stored in database)")
+            safe_print("=" * 80 + "\n")
         except Exception as e:
-            print("WARNING: Could not collect talk contents:", repr(e))
+            safe_print("WARNING: Could not collect talk contents:", repr(e))
 
         # =========================================================
 
-        print("Login submitted successfully.")
-        print("URL:", driver.current_url)
-        print("Title:", driver.title)
+        safe_print("Login submitted successfully.")
+        safe_print("URL:", driver.current_url)
+        safe_print("Title:", driver.title)
 
         if not auto_exit:
             input("If login is successful, press ENTER to close...")
-
     finally:
-        driver.quit()
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        _release_lock()
 
 
 if __name__ == "__main__":

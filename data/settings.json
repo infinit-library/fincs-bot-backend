@@ -15,7 +15,7 @@
     "USDJPY": 22,
     "GBPUSD": 23
   },
-  "signal_freshness_seconds": 0,
+  "signal_freshness_seconds": 180,
   "process_last_n": 0,
   "strict_mode": false,
   "allow_market_without_prices": true

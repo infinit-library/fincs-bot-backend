@@ -7,7 +7,7 @@ SETTINGS_PATH = BASE_DIR / "data" / "settings.json"
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "poll_interval": 15,
     "allowed_pairs": ["USDJPY", "EURUSD"],
-    "max_lot_cap": 1.0,
+    "max_lot_cap": 0.8,
     "dedup_window": 30,
     "dry_run": True,
     "running": False,

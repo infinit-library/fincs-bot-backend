@@ -20,6 +20,8 @@ def _find_max_units(broker, uic: int, direction: str, equity: float, max_units: 
     margin = broker.precheck_order(uic, direction, high) if hasattr(broker, "precheck_order") else None
     if margin is not None and margin <= equity:
         return high
+    if margin is None:
+        high = max(high // 2, 0)
 
     while low <= high:
         mid = (low + high) // 2
@@ -27,7 +29,8 @@ def _find_max_units(broker, uic: int, direction: str, equity: float, max_units: 
             return last_ok
         margin = broker.precheck_order(uic, direction, mid) if hasattr(broker, "precheck_order") else None
         if margin is None:
-            return last_ok
+            high = mid - 1
+            continue
         if margin <= equity:
             last_ok = mid
             low = mid + 1
@@ -62,9 +65,18 @@ def main() -> None:
     equity = broker.get_equity() if hasattr(broker, "get_equity") else None
     if equity is None:
         raise SystemExit("Equity unavailable")
+    try:
+        max_lot_cap = float(settings.get("max_lot_cap", runtime_config.DEFAULT_SETTINGS.get("max_lot_cap", 0.8)))
+    except Exception:
+        max_lot_cap = 1.0
+    if max_lot_cap <= 0:
+        raise SystemExit("Invalid max_lot_cap setting")
+    if max_lot_cap > 1.0:
+        max_lot_cap = 1.0
+    capped_equity = equity * max_lot_cap
 
     max_units = int(settings.get("max_total_units", runtime_config.DEFAULT_SETTINGS.get("max_total_units", 500000)))
-    baseline_units = _find_max_units(broker, int(uic), direction, float(equity), max_units)
+    baseline_units = _find_max_units(broker, int(uic), direction, float(capped_equity), max_units)
     if baseline_units is None or baseline_units <= 0:
         raise SystemExit("Baseline units unavailable")
 

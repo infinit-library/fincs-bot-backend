@@ -501,11 +501,35 @@ def open_talk_thread_by_title(driver, wait, title: str):
     raise RuntimeError(f"Could not open talk thread by title: {title}")
 
 
+def open_first_talk_thread(driver, wait) -> bool:
+    """
+    Fallback: open the first visible talk thread in the list.
+    Returns True if a click is attempted successfully.
+    """
+    try:
+        candidates = driver.find_elements(By.CSS_SELECTOR, 'a, button, [role="button"], li')
+    except Exception:
+        candidates = []
+    for c in candidates:
+        try:
+            if visible(c):
+                js_click(driver, c)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def main(auto_exit: bool = False):
+    if SCRAPE_LOCK_PATH.exists():
+        try:
+            SCRAPE_LOCK_PATH.unlink()
+        except Exception:
+            pass
     _acquire_lock()
     driver = None
     # ---- Load credentials ----
-    load_dotenv()
+    load_dotenv(override=True)
     EMAIL = os.getenv("FINCS_EMAIL")
     PASSWORD = os.getenv("FINCS_PASSWORD")
 
@@ -699,7 +723,7 @@ def main(auto_exit: bool = False):
         # =========================================================
         # 6) OPEN TALK THREAD: エントリー&決済タイミング
         # =========================================================
-        talk_title = "エントリー&決済タイミング"
+        talk_title = os.getenv("FINCS_TALK_TITLE", "?????&???????")
         thread_wait = WebDriverWait(driver, 40)
         
         # Wait for talk list to load (look for any clickable items)
@@ -731,7 +755,10 @@ def main(auto_exit: bool = False):
                 if any(visible(x) for x in already):
                     safe_print(f"Already on talk thread (detected by keywords): {talk_title}")
                 else:
-                    raise RuntimeError(
+                    if open_first_talk_thread(driver, thread_wait):
+                        safe_print("[WARN] Opened fallback talk thread.")
+                    else:
+                        raise RuntimeError(
                         f"Failed to open talk thread '{talk_title}'. "
                         f"Current URL={driver.current_url!r} Title={driver.title!r}. "
                         f"Original error: {e!r}"
@@ -828,4 +855,15 @@ if __name__ == "__main__":
 
 # Allow non-interactive scrape
 def scrape_once():
-    return main(auto_exit=True)
+    retries = int(os.getenv("FINCS_SCRAPE_RETRIES", "2"))
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            return main(auto_exit=True)
+        except InvalidSessionIdException as exc:
+            last_exc = exc
+            safe_print(f"[WARN] Invalid session id (attempt {attempt}/{retries}), retrying...")
+            time.sleep(2)
+    if last_exc:
+        raise last_exc
+    return None

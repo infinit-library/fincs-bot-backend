@@ -53,3 +53,7 @@ def _auth_base(env: str) -> str:
     if env == "live":
         return "https://live.logonvalidation.net"
     return "https://sim.logonvalidation.net"
+
+
+def load_saxo_settings() -> SaxoSettings:
+    return SaxoSettings.from_env()

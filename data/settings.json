@@ -4,15 +4,15 @@
     "USDJPY",
     "EURUSD"
   ],
-  "max_lot_cap": 1,
+  "max_lot_cap": 0.8,
   "dedup_window": 30,
-  "dry_run": true,
+  "dry_run": false,
   "running": true,
   "headless_scrape": false,
   "broker": "saxo",
   "saxo_uic_map": {
+    "USDJPY": 42,
     "EURUSD": 21,
-    "USDJPY": 22,
     "GBPUSD": 23
   },
   "signal_freshness_seconds": 180,

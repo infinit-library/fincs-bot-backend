@@ -22,7 +22,9 @@ def connect_db(db_path: str | Path = DB_PATH) -> sqlite3.Connection:
     """Open SQLite connection and ensure schema exists."""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=2, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=2000;")
     conn.row_factory = sqlite3.Row
     _ensure_schema(conn)
     return conn
@@ -75,38 +77,40 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_parsed_trading ON parsed_events(is_trading, scraped_at DESC);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_parsed_pair ON parsed_events(pair, scraped_at DESC);")
 
-    # Backfill columns if the table already existed
+    # Backfill columns if the tables already existed
+    raw_cols = {row[1] for row in cur.execute("PRAGMA table_info(raw_snapshots)").fetchall()}
+    if "created_at" not in raw_cols:
+        cur.execute("ALTER TABLE raw_snapshots ADD COLUMN created_at TEXT;")
+        cur.execute("""
+            UPDATE raw_snapshots
+            SET created_at = COALESCE(scraped_at, datetime('now'))
+            WHERE created_at IS NULL
+            """)
+
+
     existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(parsed_events)").fetchall()}
     for col_def in [
+        ("entry_price", "REAL"),
+        ("sl_price", "REAL"),
+        ("tp_price", "REAL"),
+        ("signal_id", "TEXT"),
         ("direction", "TEXT"),
         ("instrument", "TEXT"),
         ("uic", "INTEGER"),
         ("asset_type", "TEXT"),
         ("signal_timestamp", "TEXT"),
-        ("entry_price", "REAL"),
-        ("sl_price", "REAL"),
-        ("tp_price", "REAL"),
-        ("signal_id", "TEXT"),
     ]:
         col_name, col_type = col_def
         if col_name not in existing_cols:
             cur.execute(f"ALTER TABLE parsed_events ADD COLUMN {col_name} {col_type};")
+    if "created_at" not in existing_cols:
+        cur.execute("ALTER TABLE parsed_events ADD COLUMN created_at TEXT;")
+        cur.execute("""
+            UPDATE parsed_events
+            SET created_at = COALESCE(scraped_at, datetime('now'))
+            WHERE created_at IS NULL
+            """)
 
-    cur.execute(
-        "CREATE TABLE IF NOT EXISTS daily_equity (date_key TEXT PRIMARY KEY, equity REAL NOT NULL, created_at TEXT NOT NULL);"
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS baseline_lots (
-            instrument TEXT NOT NULL,
-            direction TEXT NOT NULL,
-            baseline_units INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (instrument, direction)
-        );
-        """
-    )
 
     # Track executions to avoid double-firing broker orders
     cur.execute(
@@ -126,7 +130,71 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_executed_hash_broker ON executed_orders(segment_hash, broker);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_executed_created ON executed_orders(created_at DESC);")
 
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_audits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            segment_hash TEXT,
+            broker TEXT NOT NULL,
+            pair TEXT,
+            action TEXT,
+            side TEXT,
+            dry_run INTEGER NOT NULL DEFAULT 1,
+            ok INTEGER NOT NULL DEFAULT 0,
+            reason TEXT,
+            mid REAL,
+            spread REAL,
+            payload TEXT,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_audits_created ON trade_audits(created_at DESC);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_audits_hash ON trade_audits(segment_hash);")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS baseline_units (
+            instrument TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            units INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (instrument, direction)
+        );
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_equity (
+            date_key TEXT PRIMARY KEY,
+            equity REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+
+    baseline_cols = {row[1] for row in cur.execute("PRAGMA table_info(baseline_units)").fetchall()}
+    if "created_at" not in baseline_cols:
+        cur.execute("ALTER TABLE baseline_units ADD COLUMN created_at TEXT;")
+        cur.execute("UPDATE baseline_units SET created_at = COALESCE(created_at, datetime('now')) WHERE created_at IS NULL")
+    if "updated_at" not in baseline_cols:
+        cur.execute("ALTER TABLE baseline_units ADD COLUMN updated_at TEXT;")
+        cur.execute("UPDATE baseline_units SET updated_at = COALESCE(updated_at, datetime('now')) WHERE updated_at IS NULL")
+
+    daily_cols = {row[1] for row in cur.execute("PRAGMA table_info(daily_equity)").fetchall()}
+    if "created_at" not in daily_cols:
+        cur.execute("ALTER TABLE daily_equity ADD COLUMN created_at TEXT;")
+        cur.execute("UPDATE daily_equity SET created_at = COALESCE(created_at, date_key) WHERE created_at IS NULL")
+    if "updated_at" not in daily_cols:
+        cur.execute("ALTER TABLE daily_equity ADD COLUMN updated_at TEXT;")
+        cur.execute("UPDATE daily_equity SET updated_at = COALESCE(updated_at, date_key) WHERE updated_at IS NULL")
+
     conn.commit()
+
 
 
 def insert_raw_snapshot(
@@ -136,20 +204,21 @@ def insert_raw_snapshot(
     raw_hash: str,
     raw_text: str,
 ) -> bool:
-    """Insert raw snapshot; return True if inserted, False if duplicate."""
+    """
+    Insert raw snapshot; if the same raw_hash already exists, replace the old row so
+    the newest scrape is retained.
+    """
     cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            INSERT INTO raw_snapshots (scraped_at, channel, raw_hash, raw_text, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (scraped_at, channel, raw_hash, raw_text, utcnow()),
-        )
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError:
-        return False
+    cur.execute(
+        """
+        INSERT OR REPLACE INTO raw_snapshots (scraped_at, channel, raw_hash, raw_text, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (scraped_at, channel, raw_hash, raw_text, utcnow()),
+    )
+    conn.commit()
+    return True
+
 
 
 def insert_parsed_event(
@@ -173,46 +242,46 @@ def insert_parsed_event(
     asset_type: Optional[str],
     signal_timestamp: Optional[str],
 ) -> bool:
-    """Insert parsed segment; return True if inserted, False if duplicate."""
+    """
+    Insert parsed segment; if the same segment_hash exists, replace it so the latest
+    scrape overwrites older copies.
+    """
     cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            INSERT INTO parsed_events (
-                scraped_at, segment_hash, segment_text, is_trading,
-                pair, action, side, lot_ratio, is_add,
-                entry_price, sl_price, tp_price, signal_id,
-                direction, instrument, uic, asset_type, signal_timestamp,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                scraped_at,
-                segment_hash,
-                segment_text,
-                1 if is_trading else 0,
-                pair,
-                action,
-                side,
-                lot_ratio,
-                1 if is_add else 0,
-                entry_price,
-                sl_price,
-                tp_price,
-                signal_id,
-                direction,
-                instrument,
-                uic,
-                asset_type,
-                signal_timestamp,
-                utcnow(),
-            ),
+    cur.execute(
+        """
+        INSERT OR REPLACE INTO parsed_events (
+            scraped_at, segment_hash, segment_text, is_trading,
+            pair, action, side, lot_ratio, is_add,
+            entry_price, sl_price, tp_price, signal_id,
+            direction, instrument, uic, asset_type, signal_timestamp,
+            created_at
         )
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError:
-        return False
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            scraped_at,
+            segment_hash,
+            segment_text,
+            1 if is_trading else 0,
+            pair,
+            action,
+            side,
+            lot_ratio,
+            1 if is_add else 0,
+            entry_price,
+            sl_price,
+            tp_price,
+            signal_id,
+            direction,
+            instrument,
+            uic,
+            asset_type,
+            signal_timestamp,
+            utcnow(),
+        ),
+    )
+    conn.commit()
+    return True
 
 
 def _rows_to_dicts(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
@@ -364,50 +433,194 @@ def list_executions(conn: sqlite3.Connection, limit: int = 100) -> List[Dict[str
     return _rows_to_dicts(cur.fetchall())
 
 
-def was_executed_recent(conn: sqlite3.Connection, segment_hash: str, broker: str, window_seconds: int) -> bool:
-    cur = conn.cursor()
-    cur.execute("SELECT created_at FROM executed_orders WHERE segment_hash = ? AND broker = ? ORDER BY datetime(created_at) DESC LIMIT 1", (segment_hash, broker))
-    row = cur.fetchone()
-    if not row:
-        return False
-    try:
-        created_at = datetime.fromisoformat(row["created_at"])
-    except Exception:
-        return False
-    return (datetime.now(timezone.utc) - created_at).total_seconds() <= window_seconds
+# --- Trade audit helpers ----------------------------------------------------
 
-def get_recent_executions(conn: sqlite3.Connection, broker: str, limit: int = 3) -> List[Dict[str, Any]]:
+def record_trade_audit(
+    conn: sqlite3.Connection,
+    segment_hash: str | None,
+    broker: str,
+    pair: Optional[str],
+    action: Optional[str],
+    side: Optional[str],
+    dry_run: bool,
+    ok: bool,
+    reason: Optional[str],
+    mid: Optional[float],
+    spread: Optional[float],
+    payload: Optional[str],
+) -> None:
     cur = conn.cursor()
-    cur.execute("SELECT * FROM executed_orders WHERE broker = ? ORDER BY datetime(created_at) DESC LIMIT ?", (broker, limit))
+    cur.execute(
+        """
+        INSERT INTO trade_audits
+        (segment_hash, broker, pair, action, side, dry_run, ok, reason, mid, spread, payload, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            segment_hash,
+            broker,
+            pair,
+            action,
+            side,
+            1 if dry_run else 0,
+            1 if ok else 0,
+            reason,
+            mid,
+            spread,
+            payload,
+            utcnow(),
+        ),
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS baseline_units (
+            instrument TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            units INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (instrument, direction)
+        );
+        """
+    )
+
+    conn.commit()
+
+
+def list_trade_audits(conn: sqlite3.Connection, limit: int = 100) -> List[Dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM trade_audits
+        ORDER BY datetime(created_at) DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
     return _rows_to_dicts(cur.fetchall())
 
-def get_daily_equity(conn: sqlite3.Connection, date_key: str) -> Optional[float]:
-    cur = conn.cursor()
-    cur.execute("SELECT equity FROM daily_equity WHERE date_key = ? LIMIT 1", (date_key,))
-    row = cur.fetchone()
-    return float(row["equity"]) if row else None
 
-def set_daily_equity(conn: sqlite3.Connection, date_key: str, equity: float) -> None:
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO daily_equity (date_key, equity, created_at) VALUES (?, ?, ?)", (date_key, equity, utcnow()))
-    conn.commit()
+# --- Baseline sizing helpers ------------------------------------------------
 
 
 def get_baseline_units(conn: sqlite3.Connection, instrument: str, direction: str) -> Optional[int]:
     cur = conn.cursor()
-    cur.execute("SELECT baseline_units FROM baseline_lots WHERE instrument = ? AND direction = ?", (instrument, direction))
+    cur.execute(
+        """
+        SELECT units
+        FROM baseline_units
+        WHERE instrument = ? AND direction = ?
+        LIMIT 1
+        """
+        ,
+        (instrument, direction),
+    )
     row = cur.fetchone()
-    return int(row["baseline_units"]) if row else None
+    return int(row["units"]) if row and row["units"] is not None else None
+
 
 def set_baseline_units(conn: sqlite3.Connection, instrument: str, direction: str, units: int) -> None:
     cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO baseline_lots (instrument, direction, baseline_units, created_at) VALUES (?, ?, ?, ?)", (instrument, direction, int(units), utcnow()))
+    cur.execute(
+        """
+        INSERT OR REPLACE INTO baseline_units
+        (instrument, direction, units, created_at, updated_at)
+        VALUES (?, ?, ?, COALESCE((SELECT created_at FROM baseline_units WHERE instrument = ? AND direction = ?), ?), ?)
+        """
+        ,
+        (
+            instrument,
+            direction,
+            int(units),
+            instrument,
+            direction,
+            utcnow(),
+            utcnow(),
+        ),
+    )
     conn.commit()
+
 
 def clear_baseline_units(conn: sqlite3.Connection, instrument: str, direction: Optional[str] = None) -> None:
     cur = conn.cursor()
     if direction:
-        cur.execute("DELETE FROM baseline_lots WHERE instrument = ? AND direction = ?", (instrument, direction))
+        cur.execute(
+            "DELETE FROM baseline_units WHERE instrument = ? AND direction = ?",
+            (instrument, direction),
+        )
     else:
-        cur.execute("DELETE FROM baseline_lots WHERE instrument = ?", (instrument,))
+        cur.execute("DELETE FROM baseline_units WHERE instrument = ?", (instrument,))
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_equity (
+            date_key TEXT PRIMARY KEY,
+            equity REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+
     conn.commit()
+
+
+# --- Daily equity helpers ---------------------------------------------------
+
+
+def get_daily_equity(conn: sqlite3.Connection, date_key: str) -> Optional[float]:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT equity FROM daily_equity WHERE date_key = ? LIMIT 1",
+        (date_key,),
+    )
+    row = cur.fetchone()
+    return float(row["equity"]) if row and row["equity"] is not None else None
+
+
+def set_daily_equity(conn: sqlite3.Connection, date_key: str, equity: float) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR REPLACE INTO daily_equity (date_key, equity, created_at, updated_at)
+        VALUES (?, ?, COALESCE((SELECT created_at FROM daily_equity WHERE date_key = ?), ?), ?)
+        """
+        ,
+        (date_key, float(equity), date_key, utcnow(), utcnow()),
+    )
+    conn.commit()
+
+
+# --- Execution summary helpers ----------------------------------------------
+
+
+def get_recent_executions(conn: sqlite3.Connection, broker: str, limit: int = 3) -> List[Dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM executed_orders
+        WHERE broker = ?
+        ORDER BY datetime(created_at) DESC
+        LIMIT ?
+        """
+        ,
+        (broker, limit),
+    )
+    return _rows_to_dicts(cur.fetchall())
+
+
+# --- Recent execution guard -------------------------------------------------
+
+
+def was_executed_recent(conn: sqlite3.Connection, segment_hash: str, broker: str, window_seconds: int = 600) -> bool:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1 FROM executed_orders
+        WHERE segment_hash = ? AND broker = ?
+          AND datetime(created_at) >= datetime('now', ?)
+        LIMIT 1
+        """
+        ,
+        (segment_hash, broker, f'-{int(window_seconds)} seconds'),
+    )
+    return cur.fetchone() is not None

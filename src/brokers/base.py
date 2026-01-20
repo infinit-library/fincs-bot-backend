@@ -1,17 +1,22 @@
-from abc import ABC, abstractmethod
-from typing import Any
+﻿import abc
+from typing import Dict, Any
 
 
-class BaseBroker(ABC):
+class BaseBroker(abc.ABC):
+    """Abstract broker interface for read-only operations."""
 
-    @abstractmethod
-    def get_accounts(self) -> Any:
-        pass
+    @abc.abstractmethod
+    def get_account_info(self) -> Dict[str, Any]:
+        ...
 
-    @abstractmethod
-    def get_balance(self) -> Any:
-        pass
+    @abc.abstractmethod
+    def get_balance(self) -> Dict[str, Any]:
+        ...
 
-    @abstractmethod
-    def get_price(self, symbol: str) -> Any:
-        pass
+    @abc.abstractmethod
+    def get_positions(self) -> Dict[str, Any]:
+        ...
+
+    @abc.abstractmethod
+    def get_price(self, symbol: str) -> Dict[str, Any]:
+        ...

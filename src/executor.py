@@ -30,6 +30,21 @@ ALLOWED_UICS = {
 }
 
 
+
+
+def _normalize_uic_map(raw: Any) -> Dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    mapped: Dict[str, int] = {}
+    for key, val in raw.items():
+        if key is None:
+            continue
+        try:
+            mapped[str(key).upper()] = int(val)
+        except (TypeError, ValueError):
+            continue
+    return mapped
+
 def _stop(reason: str) -> None:
     print(f"STOP: {reason}")
     raise SystemExit(1)
@@ -64,6 +79,8 @@ def _find_max_units(broker, uic: int, direction: str, equity: float, max_units: 
     margin = broker.precheck_order(uic, direction, high) if hasattr(broker, "precheck_order") else None
     if margin is not None and margin <= equity:
         return high
+    if margin is None:
+        high = max(high // 2, 0)
 
     while low <= high:
         mid = (low + high) // 2
@@ -71,7 +88,8 @@ def _find_max_units(broker, uic: int, direction: str, equity: float, max_units: 
             return last_ok
         margin = broker.precheck_order(uic, direction, mid) if hasattr(broker, "precheck_order") else None
         if margin is None:
-            return last_ok
+            high = mid - 1
+            continue
         if margin <= equity:
             last_ok = mid
             low = mid + 1
@@ -86,20 +104,33 @@ def execute_pending_signals(
     dry_run: bool = True,
     allowed_pairs: Optional[List[str]] = None,
     max_total_units: int = runtime_config.DEFAULT_SETTINGS.get("max_total_units", 500000),
+    max_lot_cap: float = runtime_config.DEFAULT_SETTINGS.get("max_lot_cap", 0.8),
     freshness_seconds: int = runtime_config.DEFAULT_SETTINGS.get("signal_freshness_seconds", 180),
     process_last_n: int = runtime_config.DEFAULT_SETTINGS.get("process_last_n", 0),
     strict_mode: bool = runtime_config.DEFAULT_SETTINGS.get("strict_mode", True),
     allow_market_without_prices: bool = runtime_config.DEFAULT_SETTINGS.get("allow_market_without_prices", False),
+    uic_map: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
-    if os.getenv("SAXO_ENV", "").lower() != "sim":
-        _stop("SAXO_ENV must be sim")
+    saxo_env = os.getenv("SAXO_ENV", "").strip().lower()
+    if saxo_env not in ("sim", "live"):
+        _stop("SAXO_ENV must be sim or live")
     if os.getenv("BOT_ENABLED", "") != "true":
         _stop("BOT_ENABLED is not true")
+    if saxo_env == "live":
+        if os.getenv("ALLOW_LIVE_TRADING", "") != "true":
+            _stop("ALLOW_LIVE_TRADING is not true")
+        if os.getenv("SAXO_LIVE_CONFIRM", "").strip() != "I_UNDERSTAND":
+            _stop("SAXO_LIVE_CONFIRM missing")
 
     broker = get_broker(broker_name)
     if getattr(broker, "name", "") != "saxo":
         _stop("Unsupported broker")
 
+
+    settings = runtime_config.load_settings()
+    resolved_uic_map = _normalize_uic_map(uic_map or settings.get("saxo_uic_map", {}))
+    if not resolved_uic_map:
+        resolved_uic_map = _normalize_uic_map(ALLOWED_UICS)
 
     log_skips = os.getenv("EXECUTOR_LOG_SKIPS", "").lower() == "true"
     skip_reasons: Dict[str, int] = {}
@@ -138,6 +169,15 @@ def execute_pending_signals(
     equity = broker.get_equity() if hasattr(broker, "get_equity") else None
     if equity is None:
         _stop("Equity unavailable")
+    try:
+        max_lot_cap = float(max_lot_cap)
+    except Exception:
+        max_lot_cap = 1.0
+    if max_lot_cap <= 0:
+        _stop("Invalid max_lot_cap setting")
+    if max_lot_cap > 1.0:
+        max_lot_cap = 1.0
+    capped_equity = equity * max_lot_cap
 
     date_key = datetime.now(timezone.utc).date().isoformat()
     baseline = get_daily_equity(conn, date_key)
@@ -198,10 +238,10 @@ def execute_pending_signals(
             continue
 
         norm_instrument = str(instrument).upper().replace("/", "")
-        if norm_instrument not in ALLOWED_UICS:
+        if norm_instrument not in resolved_uic_map:
             _note_skip("instrument_not_allowed", sig)
             continue
-        if ALLOWED_UICS[norm_instrument] != uic:
+        if resolved_uic_map[norm_instrument] != uic:
             _note_skip("uic_mismatch", sig)
             continue
 
@@ -273,7 +313,7 @@ def execute_pending_signals(
                 record_execution(conn, segment_hash, broker.name, "skipped", error_message="missing baseline")
                 continue
         else:
-            baseline_units = _find_max_units(broker, uic, direction, equity, max_total_units)
+            baseline_units = _find_max_units(broker, uic, direction, capped_equity, max_total_units)
             if baseline_units is None:
                 _note_skip("baseline_unavailable", sig)
                 skipped.append({"segment_hash": segment_hash, "reason": "baseline unavailable"})
@@ -422,10 +462,12 @@ def run_execution_cycle() -> Dict[str, Any]:
         dry_run=bool(settings.get("dry_run", True)),
         allowed_pairs=settings.get("allowed_pairs"),
         max_total_units=int(settings.get("max_total_units", runtime_config.DEFAULT_SETTINGS.get("max_total_units", 500000))),
+        max_lot_cap=float(settings.get("max_lot_cap", runtime_config.DEFAULT_SETTINGS.get("max_lot_cap", 0.8))),
         freshness_seconds=int(settings.get("signal_freshness_seconds", runtime_config.DEFAULT_SETTINGS.get("signal_freshness_seconds", 180))),
         process_last_n=int(settings.get("process_last_n", runtime_config.DEFAULT_SETTINGS.get("process_last_n", 0))),
         strict_mode=bool(settings.get("strict_mode", runtime_config.DEFAULT_SETTINGS.get("strict_mode", True))),
         allow_market_without_prices=bool(settings.get("allow_market_without_prices", runtime_config.DEFAULT_SETTINGS.get("allow_market_without_prices", False))),
+        uic_map=settings.get("saxo_uic_map"),
     )
 
 

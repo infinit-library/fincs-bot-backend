@@ -1,177 +1,110 @@
-import os
+import logging
 import time
-from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
 import requests
 
 from src.config.setting import SaxoSettings
 
+logger = logging.getLogger(__name__)
 
-ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+
+@dataclass
+class Token:
+    access_token: str
+    refresh_token: Optional[str]
+    expires_at: float  # epoch seconds
+    refresh_expires_at: Optional[float] = None
+
+    @property
+    def is_expired(self) -> bool:
+        return time.time() >= self.expires_at - 30  # small buffer
 
 
 class SaxoOAuthClient:
-    def __init__(self, settings: SaxoSettings):
+    """Handles OAuth2 for Saxo OpenAPI (SIM/LIVE)."""
+
+    def __init__(self, settings: SaxoSettings) -> None:
         self.settings = settings
-        self.access_token: Optional[str] = None
-        self.expires_at: float = 0.0
+        self.token: Optional[Token] = None
+        self.auth_base = "https://sim.logonvalidation.net" if settings.environment == "sim" else "https://live.logonvalidation.net"
+        self.api_base = settings.base_url
 
-        # Load existing token if present
-        token = os.getenv("SAXO_ACCESS_TOKEN")
-        expires_at = os.getenv("SAXO_ACCESS_TOKEN_EXPIRES_AT")
-        ttl = os.getenv("SAXO_ACCESS_TOKEN_TTL")
-
-        if token and expires_at:
-            self.access_token = token
-            self.expires_at = float(expires_at)
-        elif token and ttl:
-            self.access_token = token
-            try:
-                self.expires_at = time.time() + float(ttl) - 30
-            except ValueError:
-                self.expires_at = 0.0
-        elif token:
-            # Treat missing TTL as expired to fail closed
-            self.access_token = None
-            self.expires_at = 0.0
-
-    def get_authorize_url(self) -> str:
+    def authorization_url(self, state: str = "fxbot") -> str:
         return (
-            f"{self.settings.auth_base}/authorize"
-            f"?response_type=code"
+            f"{self.auth_base}/authorize?response_type=code"
             f"&client_id={self.settings.client_id}"
             f"&redirect_uri={self.settings.redirect_uri}"
+            f"&state={state}"
         )
 
-    def authenticate(self, authorization_code: str) -> None:
-        url = f"{self.settings.auth_base}/token"
-
-        payload = {
+    def authenticate(self, code: str) -> None:
+        data = {
             "grant_type": "authorization_code",
-            "code": authorization_code,
+            "code": code,
             "redirect_uri": self.settings.redirect_uri,
             "client_id": self.settings.client_id,
             "client_secret": self.settings.client_secret,
         }
+        self._exchange_token(data)
 
-        for attempt in range(3):
-            try:
-                response = requests.post(url, data=payload, timeout=60)
-                break
-            except requests.exceptions.ReadTimeout:
-                if attempt >= 2:
-                    raise
-                continue
-        if response.status_code not in (200, 201):
-            raise RuntimeError(f"OAuth failed ({response.status_code}): {response.text}")
-
-        data = response.json()
-        self._store_token(data)
-
-    def _store_token(self, data: dict) -> None:
-        self.access_token = data["access_token"]
-        expires_in = int(data["expires_in"])
-        self.expires_at = time.time() + expires_in - 30
-
-        print("OAuth authentication successful")
-        print("Access token acquired")
-
-        # (optional) print for debugging
-        print(f"Access token: {self.access_token}")
-        if "refresh_token" in data:
-            print(f"Refresh token: {data['refresh_token']}")
-        if "refresh_token_expires_in" in data:
-            print(f"Refresh token expires in {data['refresh_token_expires_in']} seconds")
-        print(f"Token expires in {expires_in} seconds")
-
-    def _update_env(self, values: dict) -> None:
-        if ENV_PATH.exists():
-            lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
-        else:
-            lines = []
-
-        keys = set(values.keys())
-        updated = []
-        seen = set()
-        for line in lines:
-            if not line or line.strip().startswith("#") or "=" not in line:
-                updated.append(line)
-                continue
-            key, _ = line.split("=", 1)
-            key = key.strip()
-            if key in values:
-                updated.append(f"{key}={values[key]}")
-                seen.add(key)
-            else:
-                updated.append(line)
-        for key in keys - seen:
-            updated.append(f"{key}={values[key]}")
-
-        ENV_PATH.write_text("\n".join(updated) + "\n", encoding="utf-8")
-
-    def _get_refresh_token(self) -> Optional[str]:
-        return os.getenv("SAXO_REFRESH_TOKEN") or os.getenv("SAXO_ACCESS_REFRESH_TOKEN")
-
-    def _auto_refresh_enabled(self) -> bool:
-        return os.getenv("SAXO_AUTO_REFRESH", "").lower() == "true"
-
-    def _refresh_threshold(self) -> int:
-        try:
-            return int(os.getenv("SAXO_AUTO_REFRESH_THRESHOLD", "60"))
-        except ValueError:
-            return 60
-
-    def refresh_access_token(self) -> None:
-        refresh_token = self._get_refresh_token()
-        if not refresh_token:
-            raise RuntimeError("Missing SAXO_REFRESH_TOKEN for auto-refresh.")
-
-        url = f"{self.settings.auth_base}/token"
-        payload = {
+    def refresh(self) -> None:
+        if not self.token or not self.token.refresh_token:
+            raise RuntimeError("No refresh_token available; re-run interactive auth")
+        data = {
             "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
+            "refresh_token": self.token.refresh_token,
             "client_id": self.settings.client_id,
             "client_secret": self.settings.client_secret,
         }
+        self._exchange_token(data)
 
-        response = requests.post(url, data=payload, timeout=30)
-        if response.status_code not in (200, 201):
-            raise RuntimeError(f"Refresh failed ({response.status_code}): {response.text}")
-
-        data = response.json()
-        access_token = data.get("access_token")
-        expires_in = data.get("expires_in")
-        new_refresh = data.get("refresh_token")
-        refresh_expires = data.get("refresh_token_expires_in")
-
-        if not access_token or not expires_in:
-            raise RuntimeError("Missing access_token or expires_in in refresh response")
-
-        self.access_token = access_token
-        self.expires_at = time.time() + int(expires_in) - 30
-
-        updates = {
-            "SAXO_ACCESS_TOKEN": access_token,
-            "SAXO_ACCESS_TOKEN_TTL": str(expires_in),
-            "SAXO_ACCESS_TOKEN_EXPIRES_AT": str(int(self.expires_at)),
-        }
-        if new_refresh:
-            updates["SAXO_REFRESH_TOKEN"] = new_refresh
-        if refresh_expires:
-            updates["SAXO_REFRESH_TOKEN_TTL"] = str(refresh_expires)
-
-        self._update_env(updates)
+    def _exchange_token(self, data: Dict[str, str]) -> None:
+        url = f"{self.auth_base}/token"
+        resp = requests.post(url, data=data, timeout=15)
+        logger.debug("POST %s -> %s", url, resp.status_code)
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise RuntimeError(f"Token request failed: {resp.status_code}")
+        payload = resp.json()
+        access = payload.get("access_token")
+        refresh = payload.get("refresh_token")
+        expires_in = payload.get("expires_in", 0)
+        refresh_expires_in = payload.get("refresh_token_expires_in")
+        refresh_expires_at = None
+        if refresh_expires_in is not None:
+            try:
+                refresh_expires_at = time.time() + int(refresh_expires_in)
+            except Exception:
+                refresh_expires_at = None
+        if not access:
+            raise RuntimeError("Token response missing access_token")
+        self.token = Token(
+            access_token=access,
+            refresh_token=refresh,
+            expires_at=time.time() + int(expires_in or 0),
+            refresh_expires_at=refresh_expires_at,
+        )
 
     def get_access_token(self) -> str:
-        if not self.access_token:
-            raise RuntimeError("OAuth not authenticated yet.")
+        if not self.token:
+            raise RuntimeError("Not authenticated. Call authenticate() first.")
+        if self.token.is_expired:
+            self.refresh()
+        return self.token.access_token
 
-        threshold = self._refresh_threshold()
-        if time.time() >= (self.expires_at - threshold):
-            if self._auto_refresh_enabled():
-                self.refresh_access_token()
-            else:
-                raise RuntimeError("Access token expired.")
+    def api_post(self, path: str, json: Optional[Dict[str, Any]] = None) -> requests.Response:
+        token = self.get_access_token()
+        url = f"{self.api_base}{path}"
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = requests.post(url, headers=headers, json=json, timeout=15)
+        logger.debug("POST %s -> %s", url, resp.status_code)
+        return resp
 
-        return self.access_token
+    def api_get(self, path: str, params: Optional[Dict[str, str]] = None) -> requests.Response:
+        token = self.get_access_token()
+        url = f"{self.api_base}{path}"
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        logger.debug("GET %s -> %s %s", url, resp.status_code, resp.text[:500])
+        return resp

@@ -85,10 +85,25 @@ def _load_oauth_from_env(oauth: SaxoOAuthClient) -> SaxoOAuthClient:
 
     if access or refresh:
         oauth.token = Token(access_token=access, refresh_token=refresh, expires_at=expires_at, refresh_expires_at=refresh_expires_at)
-        if refresh and oauth.token.is_expired:
-            oauth.refresh()
-            if oauth.token:
-                _persist_saxo_tokens(oauth.token)
+        disable_refresh = os.getenv("SAXO_DISABLE_REFRESH", "").strip().lower() in {"1", "true", "yes"}
+        should_refresh = refresh and (not access or oauth.token.is_expired)
+        if should_refresh and not disable_refresh:
+            try:
+                oauth.refresh()
+                if oauth.token:
+                    _persist_saxo_tokens(oauth.token)
+            except Exception as exc:
+                # If we still have an access token, proceed without refresh to avoid hard-fail.
+                if access:
+                    os.environ["SAXO_REFRESH_FAILED"] = "true"
+                    os.environ["SAXO_REFRESH_FAILED_REASON"] = str(exc)
+                else:
+                    raise RuntimeError(
+                        "Saxo token refresh failed and no access token is available. "
+                        "Ensure SAXO_ENV and client credentials match the token environment, "
+                        "or re-authorize to obtain new tokens. "
+                        f"Original error: {exc}"
+                    )
 
     return oauth
 

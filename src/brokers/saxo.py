@@ -44,6 +44,22 @@ class SaxoBroker(BaseBroker):
                 usd_jpy_uic = os.getenv(DEFAULT_USDJPY_UIC_ENV)
         self.usd_jpy_uic = usd_jpy_uic
 
+    def _resolve_uic(self, symbol_or_uic: Optional[str | int]) -> int:
+        if symbol_or_uic is None:
+            raise ValueError("Missing instrument/UIC")
+        if isinstance(symbol_or_uic, int):
+            return int(symbol_or_uic)
+        raw = str(symbol_or_uic).strip()
+        if raw.isdigit():
+            return int(raw)
+        symbol = raw.upper().replace("_", "")
+        if symbol in self.uic_map:
+            return int(self.uic_map[symbol])
+        if symbol == "USDJPY":
+            uic = self.usd_jpy_uic or _load_default_uic()
+            return int(uic)
+        raise ValueError("Missing UIC for symbol")
+
     def _handle_response(self, resp) -> Dict[str, Any]:
         if resp.status_code == 200:
             return resp.json()
@@ -98,20 +114,13 @@ class SaxoBroker(BaseBroker):
         payload = self.get_positions()
         return _extract_positions(payload)
 
-    def get_open_position_units(self, uic: int) -> int:
+    def get_open_position_units(self, uic: int | str) -> int:
         positions = self.refresh_positions()
-        return int(positions.get(int(uic), 0))
+        resolved = self._resolve_uic(uic)
+        return int(positions.get(int(resolved), 0))
 
     def get_price(self, symbol: str) -> Dict[str, Any]:
-        symbol = symbol.upper()
-        uic = None
-        if symbol in self.uic_map:
-            uic = self.uic_map[symbol]
-        elif symbol == "USDJPY":
-            uic = self.usd_jpy_uic or _load_default_uic()
-        if not uic:
-            raise ValueError("Missing UIC for symbol")
-
+        uic = self._resolve_uic(symbol)
         params = {"Uics": uic, "AssetType": "FxSpot"}
         resp = self.oauth.api_get("/trade/v1/prices", params=params)
         return self._handle_response(resp)
@@ -147,8 +156,9 @@ class SaxoBroker(BaseBroker):
         if payload is None:
             if instrument is None or side is None or units is None:
                 return SaxoResult(False, None, "Missing order parameters", None)
+            uic = self._resolve_uic(instrument)
             payload = {
-                "Uic": int(instrument),
+                "Uic": int(uic),
                 "AssetType": "FxSpot",
                 "Amount": int(abs(units)),
                 "BuySell": "Buy" if side.upper() == "BUY" else "Sell",

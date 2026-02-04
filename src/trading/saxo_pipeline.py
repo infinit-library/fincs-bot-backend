@@ -170,15 +170,20 @@ def run_latest_signal_pipeline(broker: SaxoBroker) -> Dict[str, Any]:
 
     submit = broker.place_market_order(order_payload)
     if submit.get("ok"):
+        payload = submit.get("payload") or {}
+        order_id = None
+        if isinstance(payload, dict):
+            order_id = payload.get("OrderId") or payload.get("orderId")
         record_execution(
             conn,
             segment_hash or "",
             BROKER_NAME,
             "submitted",
-            payload=json.dumps(submit.get("payload") or {}, ensure_ascii=True),
+            order_id=str(order_id) if order_id else None,
+            payload=json.dumps(payload, ensure_ascii=True),
         )
         conn.close()
-        return {"status": "submitted", "payload": submit.get("payload")}
+        return {"status": "submitted", "payload": submit.get("payload"), "order_id": order_id}
 
     error = submit.get("error") or "order submission failed"
     record_execution(conn, segment_hash or "", BROKER_NAME, "failed", error_message=error)

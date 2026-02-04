@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -89,8 +90,16 @@ class SaxoOAuthClient:
     def get_access_token(self) -> str:
         if not self.token:
             raise RuntimeError("Not authenticated. Call authenticate() first.")
-        if self.token.is_expired:
-            self.refresh()
+        disable_refresh = os.getenv("SAXO_DISABLE_REFRESH", "").strip().lower() in {"1", "true", "yes"}
+        if self.token.is_expired and not disable_refresh:
+            try:
+                self.refresh()
+            except Exception as exc:
+                raise RuntimeError(
+                    "Token refresh failed. Ensure SAXO_ENV and client credentials match the token environment, "
+                    "or re-authorize to obtain new tokens. "
+                    f"Original error: {exc}"
+                )
         return self.token.access_token
 
     def api_post(self, path: str, json: Optional[Dict[str, Any]] = None) -> requests.Response:
